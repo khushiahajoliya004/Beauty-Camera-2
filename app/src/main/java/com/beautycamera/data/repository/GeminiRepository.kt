@@ -68,9 +68,10 @@ class GeminiRepository(
 
             onStatusUpdate("Generating portrait image...")
 
-            // Pollinations.ai is a free, high-quality image generation tool (using Flux/SDXL)
-            val encodedPrompt = URLEncoder.encode(finalPrompt, "UTF-8")
-            val url = "https://pollinations.ai/p/$encodedPrompt?width=1024&height=1024&seed=${System.currentTimeMillis()}&model=flux&nologo=true"
+            // image.pollinations.ai is the correct API endpoint (pollinations.ai/p returns HTML)
+            // URLEncoder uses + for spaces; replace with %20 for URL path compatibility
+            val encodedPrompt = URLEncoder.encode(finalPrompt, "UTF-8").replace("+", "%20")
+            val url = "https://image.pollinations.ai/prompt/$encodedPrompt?width=1024&height=1024&seed=${System.currentTimeMillis()}&model=flux&nologo=true"
 
             val imageRequest = Request.Builder().url(url).build()
             val imageResponse = httpClient.newCall(imageRequest).execute()
