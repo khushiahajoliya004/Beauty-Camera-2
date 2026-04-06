@@ -1,0 +1,6 @@
+-keep class com.beautycamera.** { *; }
+-keep class com.google.mediapipe.** { *; }
+-keep class jp.co.cyberagent.android.gpuimage.** { *; }
+-keep class org.opencv.** { *; }
+-dontwarn com.google.mediapipe.**
+-dontwarn jp.co.cyberagent.**
