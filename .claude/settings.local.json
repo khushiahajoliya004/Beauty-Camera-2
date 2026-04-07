@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(grep -E \"\\\\.\\(kt|java|xml|env|properties\\)$\")"
+      "Bash(grep -E \"\\\\.\\(kt|java|xml|env|properties\\)$\")",
+      "Bash(xargs grep:*)"
     ]
   }
 }

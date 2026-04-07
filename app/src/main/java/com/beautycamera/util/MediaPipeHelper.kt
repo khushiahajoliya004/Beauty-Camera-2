@@ -145,6 +145,10 @@ class MediaPipeHelper @Inject constructor(private val context: Context) {
     ): FaceLandmarks {
         val points = MutableList(478) { Pair(eyeMidNX, eyeMidNY) }
 
+        // dN is normalized to image WIDTH. Y coordinates are normalized to image HEIGHT.
+        // All Y offsets derived from dN must be scaled by this ratio so they map correctly.
+        val ar = imageWidth.toFloat() / imageHeight.toFloat()
+
         fun setCircle(indices: List<Int>, cx: Float, cy: Float, rx: Float, ry: Float) {
             indices.forEachIndexed { i, idx ->
                 val angle = (i.toFloat() / indices.size) * 2f * Math.PI.toFloat()
@@ -165,28 +169,28 @@ class MediaPipeHelper @Inject constructor(private val context: Context) {
             }
         }
 
-        // Lips — centered below eyes
+        // Lips — centered below eyes (Y offset scaled by ar to convert width→height units)
         val mouthX = eyeMidNX
-        val mouthY = eyeMidNY + dN * 1.35f
-        setCircle(lipIndices, mouthX, mouthY, dN * 0.38f, dN * 0.09f)
+        val mouthY = eyeMidNY + dN * 1.35f * ar
+        setCircle(lipIndices, mouthX, mouthY, dN * 0.38f, dN * 0.09f * ar)
 
-        // Left cheek — placed at upper cheek apple (below outer eye, above mouth)
-        setCircle(leftCheekIndices, eyeMidNX - dN * 0.62f, eyeMidNY + dN * 0.20f, dN * 0.12f, dN * 0.10f)
+        // Left cheek — upper cheek apple (below outer eye, above mouth)
+        setCircle(leftCheekIndices, eyeMidNX - dN * 0.62f, eyeMidNY + dN * 0.20f * ar, dN * 0.12f, dN * 0.10f * ar)
 
         // Right cheek — mirror of left
-        setCircle(rightCheekIndices, eyeMidNX + dN * 0.62f, eyeMidNY + dN * 0.20f, dN * 0.12f, dN * 0.10f)
+        setCircle(rightCheekIndices, eyeMidNX + dN * 0.62f, eyeMidNY + dN * 0.20f * ar, dN * 0.12f, dN * 0.10f * ar)
 
         // Left iris
-        setCircle(leftIrisIndices, eyeMidNX - dN * 0.5f, eyeMidNY, dN * 0.06f, dN * 0.06f)
+        setCircle(leftIrisIndices, eyeMidNX - dN * 0.5f, eyeMidNY, dN * 0.06f, dN * 0.06f * ar)
 
         // Right iris
-        setCircle(rightIrisIndices, eyeMidNX + dN * 0.5f, eyeMidNY, dN * 0.06f, dN * 0.06f)
+        setCircle(rightIrisIndices, eyeMidNX + dN * 0.5f, eyeMidNY, dN * 0.06f, dN * 0.06f * ar)
 
         // Left eyebrow
-        setLine(leftEyebrowIndices, eyeMidNX - dN * 0.5f, eyeMidNY - dN * 0.3f, dN * 0.22f, dN * 0.04f)
+        setLine(leftEyebrowIndices, eyeMidNX - dN * 0.5f, eyeMidNY - dN * 0.3f * ar, dN * 0.22f, dN * 0.04f * ar)
 
         // Right eyebrow
-        setLine(rightEyebrowIndices, eyeMidNX + dN * 0.5f, eyeMidNY - dN * 0.3f, dN * 0.22f, dN * 0.04f)
+        setLine(rightEyebrowIndices, eyeMidNX + dN * 0.5f, eyeMidNY - dN * 0.3f * ar, dN * 0.22f, dN * 0.04f * ar)
 
         return FaceLandmarks(points, imageWidth, imageHeight)
     }
