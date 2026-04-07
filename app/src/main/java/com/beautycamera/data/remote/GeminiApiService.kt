@@ -6,11 +6,19 @@ import retrofit2.Response
 import retrofit2.http.Body
 import retrofit2.http.POST
 import retrofit2.http.Query
+import retrofit2.http.Url
 
-// ── Request models ────────────────────────────────────────────────────────────
+// ── Gemini Request / Response models ─────────────────────────────────────────
 
 data class GeminiRequest(
-    val contents: List<GeminiContent>
+    val contents: List<GeminiContent>,
+    @SerializedName("generationConfig")
+    val generationConfig: GeminiGenerationConfig? = null
+)
+
+data class GeminiGenerationConfig(
+    @SerializedName("responseModalities")
+    val responseModalities: List<String>
 )
 
 data class GeminiContent(
@@ -19,10 +27,16 @@ data class GeminiContent(
 )
 
 data class GeminiPart(
-    val text: String? = null
+    val text: String? = null,
+    @SerializedName("inlineData")
+    val inlineData: GeminiInlineData? = null
 )
 
-// ── Response models ───────────────────────────────────────────────────────────
+data class GeminiInlineData(
+    @SerializedName("mimeType")
+    val mimeType: String,
+    val data: String
+)
 
 data class GeminiResponse(
     val candidates: List<GeminiCandidate>? = null,
@@ -39,12 +53,62 @@ data class GeminiError(
     val status: String
 )
 
+// ── Imagen Request / Response models ─────────────────────────────────────────
+
+data class ImagenRequest(
+    val instances: List<ImagenInstance>,
+    val parameters: ImagenParameters = ImagenParameters()
+)
+
+data class ImagenInstance(
+    val prompt: String
+)
+
+data class ImagenParameters(
+    val sampleCount: Int = 1
+)
+
+data class ImagenResponse(
+    val predictions: List<ImagenPrediction>? = null,
+    val error: GeminiError? = null
+)
+
+data class ImagenPrediction(
+    @SerializedName("bytesBase64Encoded")
+    val bytesBase64Encoded: String? = null,
+    val mimeType: String? = null
+)
+
 // ── Retrofit interface ────────────────────────────────────────────────────────
 
 interface GeminiApiService {
-    // gemini-2.0-flash is the current stable model (April 2026)
-    @POST("v1beta/models/gemini-2.0-flash:generateContent")
+
+    // Text prompt refinement — gemini-flash-latest (Gemini 2.5 Flash, 20 RPD free)
+    @POST("v1beta/models/gemini-flash-latest:generateContent")
     suspend fun generatePrompt(
+        @Query("key") apiKey: String,
+        @Body request: GeminiRequest
+    ): Response<GeminiResponse>
+
+    // Fallback text refinement — explicit model ID if alias fails
+    @POST("v1beta/models/gemini-2.5-flash:generateContent")
+    suspend fun generatePromptFallback(
+        @Query("key") apiKey: String,
+        @Body request: GeminiRequest
+    ): Response<GeminiResponse>
+
+    // Dynamic Imagen endpoint — model ID supplied at call site for fallback chain
+    @POST
+    suspend fun predictImagen(
+        @Url url: String,
+        @Query("key") apiKey: String,
+        @Body request: ImagenRequest
+    ): Response<ImagenResponse>
+
+    // Dynamic Gemini image endpoint — last resort, model ID supplied at call site
+    @POST
+    suspend fun generateGeminiImage(
+        @Url url: String,
         @Query("key") apiKey: String,
         @Body request: GeminiRequest
     ): Response<GeminiResponse>
