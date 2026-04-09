@@ -105,9 +105,18 @@ interface GeminiApiService {
         @Body request: ImagenRequest
     ): Response<ImagenResponse>
 
-    // Dynamic Gemini image endpoint — last resort, model ID supplied at call site
+    // Dynamic Gemini image endpoint using generateContent
     @POST
     suspend fun generateGeminiImage(
+        @Url url: String,
+        @Query("key") apiKey: String,
+        @Body request: GeminiRequest
+    ): Response<GeminiResponse>
+
+    // Dynamic Gemini image endpoint using streamGenerateContent
+    // (confirmed endpoint from AI Studio → Get code → REST)
+    @POST
+    suspend fun streamGenerateGeminiImage(
         @Url url: String,
         @Query("key") apiKey: String,
         @Body request: GeminiRequest

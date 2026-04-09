@@ -9,6 +9,7 @@ import com.beautycamera.BuildConfig
 import com.beautycamera.data.remote.GeminiApiService
 import com.beautycamera.data.remote.GeminiContent
 import com.beautycamera.data.remote.GeminiGenerationConfig
+import com.beautycamera.data.remote.GeminiInlineData
 import com.beautycamera.data.remote.GeminiPart
 import com.beautycamera.data.remote.GeminiRequest
 import com.beautycamera.data.remote.ImagenInstance
@@ -17,7 +18,6 @@ import com.beautycamera.data.remote.ImagenRequest
 import com.beautycamera.domain.model.AIStyleTemplate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.net.URL
 
 private const val TAG = "GeminiRepository"
 private const val GEMINI_BASE = "https://generativelanguage.googleapis.com/"
@@ -37,11 +37,13 @@ private val IMAGEN_MODEL_CHAIN = listOf(
 
 /**
  * Gemini native image models — tried after Imagen fails.
- * These show 0/0 limits on free tier but worth attempting.
+ * gemini-2.5-flash-image is the model confirmed working in AI Studio.
  */
+// Confirmed from AI Studio → Get code → REST
 private val GEMINI_IMAGE_MODEL_CHAIN = listOf(
-    "gemini-2.0-flash-exp",
-    "gemini-2.0-flash-preview-image-generation",
+    "gemini-2.5-flash-image",                     // confirmed exact model ID from AI Studio REST export
+    "gemini-2.0-flash-preview-image-generation",  // fallback
+    "gemini-2.0-flash-exp",                       // last fallback
 )
 
 class GeminiRepository(
@@ -50,9 +52,9 @@ class GeminiRepository(
 
     /**
      * Pipeline:
-     * 1. Refine style prompt via Gemini text model.
-     * 2. Try Imagen 4 → Imagen 3 → Gemini image models.
-     * 3. If all paid/unavailable → Pollinations.ai (free, no API key).
+     * 1. Try Imagen models (paid — skipped on 400/404/429).
+     * 2. Try Gemini image models with uploaded photo as inlineData.
+     * 3. If all fail → returns failure with error message.
      */
     suspend fun generateImage(
         sourceBitmap: Bitmap,
@@ -60,12 +62,20 @@ class GeminiRepository(
         onStatusUpdate: (String) -> Unit = {}
     ): Result<Bitmap> = withContext(Dispatchers.IO) {
         try {
-            onStatusUpdate("Refining prompt...")
-            val finalPrompt = refinePrompt(template)
-            Log.d(TAG, "Final prompt: $finalPrompt")
+            // Use the template prompt directly — do NOT rewrite it.
+            // The prompts already contain identity-preservation instructions that must not be altered.
+            val prompt = template.prompt
+            Log.d(TAG, "Using prompt: $prompt")
+
+            // Convert uploaded photo to base64 JPEG for inline image input
+            val base64Image = run {
+                val stream = java.io.ByteArrayOutputStream()
+                sourceBitmap.compress(Bitmap.CompressFormat.JPEG, 95, stream)
+                Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
+            }
 
             onStatusUpdate("Generating portrait...")
-            val bitmap = generateWithFallback(finalPrompt, onStatusUpdate)
+            val bitmap = generateWithFallback(prompt, base64Image, onStatusUpdate)
                 ?: return@withContext Result.failure(
                     Exception("All image generation models failed. Please try again later.")
                 )
@@ -78,47 +88,17 @@ class GeminiRepository(
         }
     }
 
-    // ── Step 1: Prompt refinement ─────────────────────────────────────────────
-
-    private suspend fun refinePrompt(template: AIStyleTemplate): String {
-        val default = "${template.name} style portrait, high quality, photorealistic, professional photography"
-        val request = GeminiRequest(
-            contents = listOf(
-                GeminiContent(
-                    parts = listOf(
-                        GeminiPart(
-                            text = "You are an AI prompt engineer. Optimize the following portrait prompt " +
-                                "for image generation. Preserve all visual details, lighting, clothing, and mood. " +
-                                "Keep it under 120 words. Output ONLY the final prompt text.\n\n${template.prompt}"
-                        )
-                    )
-                )
-            )
-        )
-
-        for (call in listOf(
-            runCatching { geminiApi.generatePrompt(BuildConfig.GEMINI_API_KEY, request) },
-            runCatching { geminiApi.generatePromptFallback(BuildConfig.GEMINI_API_KEY, request) }
-        )) {
-            val text = call.getOrNull()
-                ?.takeIf { it.isSuccessful }
-                ?.body()?.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
-                ?.takeIf { it.isNotBlank() }
-            if (text != null) return text
-        }
-
-        Log.w(TAG, "Prompt refinement failed, using default")
-        return default
-    }
-
-    // ── Step 2: Image generation fallback chain ───────────────────────────────
+    // ── Image generation fallback chain ──────────────────────────────────────
 
     private suspend fun generateWithFallback(
         prompt: String,
+        base64Image: String,
         onStatusUpdate: (String) -> Unit
     ): Bitmap? {
 
         // 2a. Try Imagen models (paid — will be skipped on 400/404/429)
+        // Imagen predict endpoint is text-only; pass the prompt as-is (already contains
+        // identity-preservation instructions from the template).
         val imagenRequest = ImagenRequest(
             instances = listOf(ImagenInstance(prompt = prompt)),
             parameters = ImagenParameters(sampleCount = 1)
@@ -152,62 +132,70 @@ class GeminiRepository(
             continue
         }
 
-        // 2b. Try Gemini native image models
+        // 2b. Try Gemini native image models — send the uploaded photo as inline image input.
+        // Rules that match what AI Studio sends via REST:
+        //   • role = "user" on the content object
+        //   • inlineData part BEFORE the text part
+        //   • responseModalities = ["IMAGE"] only (not ["TEXT","IMAGE"])
         val geminiImageRequest = GeminiRequest(
-            contents = listOf(GeminiContent(parts = listOf(GeminiPart(text = prompt)))),
-            generationConfig = GeminiGenerationConfig(responseModalities = listOf("TEXT", "IMAGE"))
+            contents = listOf(
+                GeminiContent(
+                    role = "user",
+                    parts = listOf(
+                        // Image FIRST — model uses this as the editing source
+                        GeminiPart(
+                            inlineData = GeminiInlineData(
+                                mimeType = "image/jpeg",
+                                data = base64Image
+                            )
+                        ),
+                        // Text SECOND — style/scene instructions
+                        GeminiPart(text = "This is an image editing task. Modify the provided image while preserving the same face, identity, and facial features. Do not change the person. Apply the following style: $prompt")
+                    )
+                )
+            ),
+            // ["IMAGE", "TEXT"] — confirmed from AI Studio → Get code → REST
+            generationConfig = GeminiGenerationConfig(responseModalities = listOf("IMAGE", "TEXT"))
         )
         for (modelId in GEMINI_IMAGE_MODEL_CHAIN) {
             onStatusUpdate("Trying Gemini image: $modelId...")
             Log.d(TAG, "Trying Gemini image: $modelId")
+
+            // generateContent returns a single JSON object — Retrofit can parse it correctly.
+            // streamGenerateContent returns a JSON array of chunks which breaks Retrofit parsing.
             val url = "${GEMINI_BASE}v1beta/models/$modelId:generateContent"
 
             val response = runCatching {
                 geminiApi.generateGeminiImage(url, BuildConfig.GEMINI_API_KEY, geminiImageRequest)
             }.getOrElse {
-                Log.w(TAG, "$modelId — network error: ${it.message}")
+                Log.e(TAG, "$modelId — network error: ${it.message}")
                 null
             } ?: continue
 
             if (response.isSuccessful) {
-                val base64 = response.body()
+                val body = response.body()
+                Log.d(TAG, "$modelId — raw response: $body")
+                val base64 = body
                     ?.candidates?.firstOrNull()
                     ?.content?.parts?.firstOrNull { it.inlineData != null }
                     ?.inlineData?.data
                 if (base64 != null) {
-                    Log.d(TAG, "Success: $modelId")
+                    Log.d(TAG, "$modelId — image generation SUCCESS")
                     val bytes = Base64.decode(base64, Base64.DEFAULT)
                     return BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                 }
+                Log.w(TAG, "$modelId — response OK but no image part. Parts: ${body?.candidates?.firstOrNull()?.content?.parts}")
                 continue
             }
 
             val code = response.code()
-            val body = response.errorBody()?.string() ?: ""
-            Log.w(TAG, "$modelId → $code: $body")
+            val errorBody = response.errorBody()?.string() ?: "no error body"
+            Log.e(TAG, "$modelId — FAILED $code: $errorBody")
             continue
         }
 
-        // 2c. Last resort: Pollinations.ai — completely free, no API key needed
-        onStatusUpdate("Using free fallback (Pollinations.ai)...")
-        Log.d(TAG, "Falling back to Pollinations.ai")
-        return tryPollinations(prompt)
-    }
-
-    /**
-     * Pollinations.ai — free image generation, returns JPEG/PNG bytes directly.
-     */
-    private fun tryPollinations(prompt: String): Bitmap? {
-        return try {
-            val encoded = java.net.URLEncoder.encode(prompt, "UTF-8")
-            val url = "https://image.pollinations.ai/prompt/$encoded" +
-                "?model=flux&width=768&height=768&nologo=true&enhance=true"
-            Log.d(TAG, "Pollinations URL: $url")
-            val bytes = URL(url).readBytes()
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-        } catch (e: Exception) {
-            Log.e(TAG, "Pollinations.ai failed: ${e.message}")
-            null
-        }
+        // All models failed — return null so the caller shows a proper error to the user.
+        Log.e(TAG, "All Gemini image models failed.")
+        return null
     }
 }
