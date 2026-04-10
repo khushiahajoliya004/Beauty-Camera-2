@@ -24,6 +24,7 @@ import com.beautycamera.data.remote.GeminiRequest
 import com.beautycamera.data.remote.ImagenInstance
 import com.beautycamera.data.remote.ImagenParameters
 import com.beautycamera.data.remote.ImagenRequest
+import com.beautycamera.data.repository.PythonBackendRepository
 import com.beautycamera.domain.model.AIStyleTemplate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -57,7 +58,8 @@ private val httpClient = OkHttpClient.Builder()
     .build()
 
 class GeminiRepository(
-    private val geminiApi: GeminiApiService
+    private val geminiApi: GeminiApiService,
+    private val pythonBackend: PythonBackendRepository? = null,
 ) {
 
     suspend fun generateImage(
@@ -66,6 +68,19 @@ class GeminiRepository(
         onStatusUpdate: (String) -> Unit = {}
     ): Result<Bitmap> = withContext(Dispatchers.IO) {
         try {
+            // ── Step 0: Try local Python backend first (best quality, free) ───
+            if (pythonBackend != null) {
+                Log.d(TAG, "Checking Python backend availability...")
+                if (pythonBackend.isAvailable()) {
+                    Log.d(TAG, "Python backend available — using it as primary generator")
+                    val result = pythonBackend.generateImage(sourceBitmap, template, onStatusUpdate)
+                    if (result.isSuccess) return@withContext result
+                    Log.w(TAG, "Python backend failed (${result.exceptionOrNull()?.message}), falling through to cloud APIs")
+                } else {
+                    Log.d(TAG, "Python backend not available — using cloud APIs")
+                }
+            }
+
             val base64Image = run {
                 val stream = java.io.ByteArrayOutputStream()
                 sourceBitmap.compress(Bitmap.CompressFormat.JPEG, 95, stream)

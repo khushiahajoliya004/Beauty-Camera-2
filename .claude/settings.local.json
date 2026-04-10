@@ -9,7 +9,25 @@
       "Bash(bash gradlew:*)",
       "Bash(bash /Users/priyanshupatel/Downloads/Beauty-Camera-2/gradlew :app:compileDebugKotlin)",
       "Bash(curl -s -X POST \"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=AIzaSyDy9W2t7C56inHeZ3nLAmVin_QMk78KP_s\" -H \"Content-Type: application/json\" -d '{\"\"\"\"contents\"\"\"\":[{\"\"\"\"role\"\"\"\":\"\"\"\"user\"\"\"\",\"\"\"\"parts\"\"\"\":[{\"\"\"\"text\"\"\"\":\"\"\"\"Generate a portrait photo of a person on a rooftop\"\"\"\"}]}],\"\"\"\"generationConfig\"\"\"\":{\"\"\"\"responseModalities\"\"\"\":[\"\"\"\"IMAGE\"\"\"\"]}}')",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(ls D:/Projects/BeautyCamera/python-backend/*.py)",
+      "Bash(powershell:*)",
+      "Bash(wmic logicaldisk:*)",
+      "Bash(ls -la D:/Projects/BeautyCamera/python-backend/weights/*/)",
+      "Bash(D:/Projects/BeautyCamera/python-backend/venv/Scripts/python.exe --version)",
+      "Bash(D:/Projects/BeautyCamera/python-backend/venv/Scripts/python.exe -c \"import torch; print\\('torch:', torch.__version__\\); print\\('CUDA:', torch.cuda.is_available\\(\\)\\); print\\('GPU:', torch.cuda.get_device_name\\(0\\) if torch.cuda.is_available\\(\\) else 'N/A'\\)\")",
+      "Bash(D:/Projects/BeautyCamera/python-backend/venv/Scripts/pip.exe list:*)",
+      "Bash(nvidia-smi)",
+      "Bash(venv/Scripts/python.exe -c ':*)",
+      "Bash(HF_HOME=D:/HuggingFaceCache HUGGINGFACE_HUB_CACHE=D:/HuggingFaceCache/hub venv/Scripts/python.exe download_models.py)",
+      "Bash(xargs cat:*)",
+      "Bash(xargs ls:*)",
+      "Bash(tasklist /fi \"imagename eq python.exe\")",
+      "Bash(ls -lh D:/HuggingFaceCache/hub/tmp*)",
+      "Bash(ipconfig)",
+      "Bash(netsh advfirewall:*)",
+      "Bash(awk '{print $5, $9}'])",
+      "Bash(HF_HOME=D:/HuggingFaceCache HUGGINGFACE_HUB_CACHE=D:/HuggingFaceCache/hub venv/Scripts/python.exe main.py)"
     ]
   }
 }

@@ -4,11 +4,13 @@ import android.content.Context
 import com.beautycamera.BuildConfig
 import com.beautycamera.data.remote.GeminiApiService
 import com.beautycamera.data.remote.HuggingFaceApiService
+import com.beautycamera.data.remote.PythonBackendApiService
 import com.beautycamera.data.remote.StabilityAiApiService
 import com.beautycamera.data.remote.TogetherAiApiService
 import com.beautycamera.data.repository.FilterRepository
 import com.beautycamera.data.repository.GeminiRepository
 import com.beautycamera.data.repository.PhotoRepository
+import com.beautycamera.data.repository.PythonBackendRepository
 import com.beautycamera.data.repository.SDRepository
 import com.beautycamera.data.repository.SettingsDataStore
 import com.beautycamera.data.repository.StickerRepository
@@ -163,6 +165,47 @@ object AppModule {
         cannyPreprocessor = cannyPreprocessor,
     )
 
+    // ── Python Local Backend ──────────────────────────────────────────────────
+
+    /**
+     * Base URL for the local Python AI backend.
+     *   - Android Emulator : http://10.0.2.2:8000/   (loopback to host machine)
+     *   - Real device (LAN): http://<HOST_LAN_IP>:8000/
+     *
+     * Change PYTHON_BACKEND_URL below to your LAN IP when testing on a real device.
+     */
+    @Provides
+    @Singleton
+    @Named("PythonClient")
+    fun providePythonOkHttpClient(logging: HttpLoggingInterceptor): OkHttpClient =
+        OkHttpClient.Builder()
+            .addInterceptor(logging)
+            .connectTimeout(10, TimeUnit.SECONDS)    // fast fail if server not running
+            .readTimeout(180, TimeUnit.SECONDS)       // generation can take up to 3 min
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .build()
+
+    @Provides
+    @Singleton
+    @Named("PythonRetrofit")
+    fun providePythonRetrofit(@Named("PythonClient") client: OkHttpClient): Retrofit =
+        Retrofit.Builder()
+            .baseUrl("http://192.168.1.6:8000/")     // real device → host LAN IP
+            .client(client)
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+
+    @Provides
+    @Singleton
+    fun providePythonBackendApiService(@Named("PythonRetrofit") retrofit: Retrofit): PythonBackendApiService =
+        retrofit.create(PythonBackendApiService::class.java)
+
+    @Provides
+    @Singleton
+    fun providePythonBackendRepository(
+        apiService: PythonBackendApiService,
+    ): PythonBackendRepository = PythonBackendRepository(apiService)
+
     // ── Gemini AI ─────────────────────────────────────────────────────────────
 
     @Provides
@@ -193,8 +236,10 @@ object AppModule {
 
     @Provides
     @Singleton
-    fun provideGeminiRepository(geminiApi: GeminiApiService): GeminiRepository =
-        GeminiRepository(geminiApi)
+    fun provideGeminiRepository(
+        geminiApi: GeminiApiService,
+        pythonBackendRepository: PythonBackendRepository,
+    ): GeminiRepository = GeminiRepository(geminiApi, pythonBackendRepository)
 
     // ── Repositories ──────────────────────────────────────────────────────────
 
