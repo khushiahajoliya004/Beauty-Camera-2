@@ -2,7 +2,14 @@
   "permissions": {
     "allow": [
       "Bash(grep -E \"\\\\.\\(kt|java|xml|env|properties\\)$\")",
-      "Bash(xargs grep:*)"
+      "Bash(xargs grep:*)",
+      "Bash(curl -s \"https://generativelanguage.googleapis.com/v1beta/models?key=AIzaSyCSBNZOGNJ-F19nTttUHmOWT9Icxz9mR20\")",
+      "Bash(python3 -c \":*)",
+      "Bash(./gradlew :app:compileDebugKotlin)",
+      "Bash(bash gradlew:*)",
+      "Bash(bash /Users/priyanshupatel/Downloads/Beauty-Camera-2/gradlew :app:compileDebugKotlin)",
+      "Bash(curl -s -X POST \"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=AIzaSyDy9W2t7C56inHeZ3nLAmVin_QMk78KP_s\" -H \"Content-Type: application/json\" -d '{\"\"\"\"contents\"\"\"\":[{\"\"\"\"role\"\"\"\":\"\"\"\"user\"\"\"\",\"\"\"\"parts\"\"\"\":[{\"\"\"\"text\"\"\"\":\"\"\"\"Generate a portrait photo of a person on a rooftop\"\"\"\"}]}],\"\"\"\"generationConfig\"\"\"\":{\"\"\"\"responseModalities\"\"\"\":[\"\"\"\"IMAGE\"\"\"\"]}}')",
+      "Bash(curl:*)"
     ]
   }
 }

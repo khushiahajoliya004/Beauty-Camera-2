@@ -83,21 +83,12 @@ data class ImagenPrediction(
 
 interface GeminiApiService {
 
-    // Text prompt refinement — primary (gemini-flash-latest = Gemini 2.5 Flash)
     @POST("v1beta/models/gemini-flash-latest:generateContent")
     suspend fun generatePrompt(
         @Query("key") apiKey: String,
         @Body request: GeminiRequest
     ): Response<GeminiResponse>
 
-    // Text prompt refinement — fallback (explicit model ID)
-    @POST("v1beta/models/gemini-2.5-flash:generateContent")
-    suspend fun generatePromptFallback(
-        @Query("key") apiKey: String,
-        @Body request: GeminiRequest
-    ): Response<GeminiResponse>
-
-    // Dynamic Imagen endpoint — model ID supplied at call site for fallback chain
     @POST
     suspend fun predictImagen(
         @Url url: String,
@@ -105,18 +96,8 @@ interface GeminiApiService {
         @Body request: ImagenRequest
     ): Response<ImagenResponse>
 
-    // Dynamic Gemini image endpoint using generateContent
     @POST
     suspend fun generateGeminiImage(
-        @Url url: String,
-        @Query("key") apiKey: String,
-        @Body request: GeminiRequest
-    ): Response<GeminiResponse>
-
-    // Dynamic Gemini image endpoint using streamGenerateContent
-    // (confirmed endpoint from AI Studio → Get code → REST)
-    @POST
-    suspend fun streamGenerateGeminiImage(
         @Url url: String,
         @Query("key") apiKey: String,
         @Body request: GeminiRequest

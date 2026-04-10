@@ -113,10 +113,17 @@ class AIGeneratorViewModel @Inject constructor(
 
             val progressJob = launch {
                 var p = 0f
-                while (p < 0.95f) {
-                    kotlinx.coroutines.delay(1000)
-                    p += 0.05f
-                    _uiState.value = _uiState.value.copy(progress = p.coerceAtMost(0.95f))
+                while (p < 0.99f) {
+                    // Fast phase 0→60% (~12 s), then slow phase 60→99% (~78 s)
+                    val delayMs = if (p < 0.60f) 800L else 2000L
+                    val step    = if (p < 0.60f) 0.04f else 0.01f
+                    kotlinx.coroutines.delay(delayMs)
+                    p = (p + step).coerceAtMost(0.99f)
+                    _uiState.value = _uiState.value.copy(
+                        progress = p,
+                        statusMessage = if (p >= 0.70f && _uiState.value.statusMessage == "Generating AI portrait...")
+                            "Still generating, please wait..." else _uiState.value.statusMessage
+                    )
                 }
             }
 
