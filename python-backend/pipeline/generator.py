@@ -129,6 +129,25 @@ class ImageGenerator:
         # No IP-Adapter — fall through to plain generation
         raise RuntimeError("IP-Adapter not available on loaded pipeline")
 
+    def generate_text2img(
+        self,
+        prompt: str,
+        negative_prompt: str,
+        width: int = 1024,
+        height: int = 1024,
+        steps: int = NUM_STEPS_HIGH,
+    ) -> Image.Image:
+        """Pure text-to-image generation — no face input required."""
+        gen_w = min(width, SD15_MAX_SIZE)
+        gen_h = min(height, SD15_MAX_SIZE)
+        return self._generate_plain_sdxl(
+            positive_prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=gen_w,
+            height=gen_h,
+            steps=steps,
+        )
+
     # ── Plain SDXL text-to-image path ─────────────────────────────────────────
 
     def _generate_plain_sdxl(

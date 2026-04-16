@@ -28,6 +28,18 @@ class PythonBackendRepository(
 
     // Maps AIStyleTemplate IDs (used by the ViewModel) → Python backend style IDs
     private val styleMap = mapOf(
+        // AI Generator card IDs
+        "ai_enhanced"            to "ai_enhanced",
+        "cinematic"              to "cinematic",
+        "sci_fi"                 to "sci_fi",
+        "oil_painting"           to "oil_painting",
+        "van_gogh"               to "van_gogh",
+        "watercolor"             to "watercolor",
+        "pencil_sketch"          to "pencil_sketch",
+        "anime"                  to "anime",
+        "golden_hour"            to "golden_hour",
+        "studio_pro"             to "studio_pro",
+        // Legacy style IDs
         "golden_hour_rooftop"    to "golden_hour_rooftop",
         "rainy_street_cinematic" to "rainy_street_cinematic",
         "minimal_studio"         to "minimal_studio_portrait",

@@ -3,15 +3,6 @@ package com.beautycamera.data.repository
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.Path
-import android.graphics.PointF
-import android.graphics.PorterDuff
-import android.graphics.PorterDuffXfermode
-import android.graphics.RadialGradient
-import android.graphics.Shader
 import android.util.Base64
 import android.util.Log
 import com.beautycamera.BuildConfig
@@ -42,11 +33,11 @@ private val IMAGEN_MODEL_CHAIN = listOf(
     "imagen-4.0-fast-generate-001",
 )
 
-// Confirmed from ListModels API — require billing (limit=0 on free tier)
+// Gemini image generation/editing models — support BOTH text→image AND image+text→image
+// Same models used by the Gemini app and website
 private val GEMINI_IMAGE_MODEL_CHAIN = listOf(
-    "gemini-3.1-flash-image-preview",
-    "gemini-3-pro-image-preview",
-    "gemini-2.5-flash-image",
+    "gemini-2.0-flash-preview-image-generation",
+    "gemini-2.0-flash-exp-image-generation",
 )
 
 // Pollinations models tried in order on failure
@@ -57,10 +48,341 @@ private val httpClient = OkHttpClient.Builder()
     .readTimeout(120, TimeUnit.SECONDS)
     .build()
 
+private const val DEFAULT_NEGATIVE =
+    "ugly, deformed, blurry, low quality, bad anatomy, extra limbs, mutated, watermark, text"
+
+private fun bitmapToBase64(bitmap: Bitmap): String {
+    val stream = java.io.ByteArrayOutputStream()
+    bitmap.compress(Bitmap.CompressFormat.JPEG, 90, stream)
+    return Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
+}
+
 class GeminiRepository(
     private val geminiApi: GeminiApiService,
     private val pythonBackend: PythonBackendRepository? = null,
 ) {
+
+    // Holds the analyzed gender + full description of the uploaded person
+    private data class PersonInfo(val gender: String, val description: String)
+
+    /**
+     * AI portrait style transfer — like uploading a photo in the Gemini app.
+     *
+     * PIPELINE:
+     * 1. Analyze the photo first → get EXACT gender + appearance (prevents gender swap)
+     * 2. PRIMARY: Gemini image-to-image with gender-locked prompt (photo as input)
+     * 3. FALLBACK: Gemini text-to-image using the person description + style
+     * 4. LAST: Pollinations.ai (free, always works)
+     */
+    suspend fun generateWithPhotoAndPrompt(
+        sourceBitmap: Bitmap,
+        stylePrompt: String,
+        styleId: String = "",
+        onStatusUpdate: (String) -> Unit = {}
+    ): Result<Bitmap> = withContext(Dispatchers.IO) {
+        try {
+            // ── Step 0: Python GPU backend ────────────────────────────────────
+            if (pythonBackend != null && pythonBackend.isAvailable()) {
+                val template = AIStyleTemplate(
+                    id = styleId.ifBlank { "ai_enhanced" }, name = "Custom",
+                    prompt = stylePrompt, negativePrompt = DEFAULT_NEGATIVE, thumbnailResId = 0
+                )
+                val result = pythonBackend.generateImage(sourceBitmap, template, onStatusUpdate)
+                if (result.isSuccess) return@withContext result
+                Log.w(TAG, "Python backend failed — falling back to cloud")
+            }
+
+            val base64Image = bitmapToBase64(sourceBitmap)
+
+            // ── Step 1: Analyze person — gender + appearance (CRITICAL) ───────
+            // This runs first so ALL subsequent prompts know the exact gender.
+            onStatusUpdate("Reading your photo...")
+            val person = analyzePersonDetailed(base64Image)
+            Log.d(TAG, "Person → gender=${person.gender}, desc=${person.description}")
+
+            // ── Step 2: Gemini image-to-image (sends actual photo) ────────────
+            // Prompt explicitly states the detected gender so Gemini CANNOT swap it.
+            onStatusUpdate("Generating AI portrait...")
+            val imageEditPrompt = buildGenderLockedEditPrompt(person, stylePrompt)
+
+            for (modelId in GEMINI_IMAGE_MODEL_CHAIN) {
+                val url = "${GEMINI_BASE}v1beta/models/$modelId:generateContent"
+                val request = GeminiRequest(
+                    contents = listOf(
+                        GeminiContent(
+                            role = "user",
+                            parts = listOf(
+                                GeminiPart(inlineData = GeminiInlineData("image/jpeg", base64Image)),
+                                GeminiPart(text = imageEditPrompt)
+                            )
+                        )
+                    ),
+                    generationConfig = GeminiGenerationConfig(
+                        responseModalities = listOf("IMAGE", "TEXT")
+                    )
+                )
+                val response = runCatching {
+                    geminiApi.generateGeminiImage(url, BuildConfig.GEMINI_API_KEY, request)
+                }.getOrElse { Log.w(TAG, "$modelId error: ${it.message}"); null } ?: continue
+
+                if (response.isSuccessful) {
+                    val base64 = response.body()
+                        ?.candidates?.firstOrNull()
+                        ?.content?.parts?.firstOrNull { it.inlineData != null }
+                        ?.inlineData?.data
+                    if (base64 != null) {
+                        val bytes = Base64.decode(base64, Base64.DEFAULT)
+                        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        if (bmp != null) {
+                            Log.d(TAG, "Image-to-image success ($modelId)")
+                            return@withContext Result.success(bmp)
+                        }
+                    }
+                    Log.w(TAG, "$modelId — no image in response")
+                } else {
+                    Log.w(TAG, "$modelId → ${response.code()}: ${response.errorBody()?.string()}")
+                }
+            }
+
+            // ── Step 3: Text-to-image fallback (person desc + style) ──────────
+            // Person description already has correct gender — no gender swap possible.
+            onStatusUpdate("Generating AI art...")
+            val textPrompt = buildTextPrompt(person, stylePrompt)
+            Log.d(TAG, "Text prompt: $textPrompt")
+
+            for (modelId in GEMINI_IMAGE_MODEL_CHAIN) {
+                val url = "${GEMINI_BASE}v1beta/models/$modelId:generateContent"
+                val request = GeminiRequest(
+                    contents = listOf(
+                        GeminiContent(
+                            role = "user",
+                            parts = listOf(GeminiPart(text = textPrompt))
+                        )
+                    ),
+                    generationConfig = GeminiGenerationConfig(
+                        responseModalities = listOf("IMAGE", "TEXT")
+                    )
+                )
+                val response = runCatching {
+                    geminiApi.generateGeminiImage(url, BuildConfig.GEMINI_API_KEY, request)
+                }.getOrElse { null } ?: continue
+
+                if (response.isSuccessful) {
+                    val base64 = response.body()
+                        ?.candidates?.firstOrNull()
+                        ?.content?.parts?.firstOrNull { it.inlineData != null }
+                        ?.inlineData?.data
+                    if (base64 != null) {
+                        val bytes = Base64.decode(base64, Base64.DEFAULT)
+                        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        if (bmp != null) return@withContext Result.success(bmp)
+                    }
+                }
+            }
+
+            // ── Step 4: Pollinations free (always works) ──────────────────────
+            // Generate the COMPLETE full-body image from text only.
+            // The face, body, clothes, and background are all generated together so
+            // they naturally match in size, lighting, style, and proportion.
+            // (Pasting a face photo over an AI body always looks editor-made because
+            //  the two images have different lighting, scale, and style — Gemini
+            //  image-to-image above is the right path for face-matching.)
+            onStatusUpdate("Generating full body AI image...")
+            val seed = sourceBitmap.hashCode().toLong().let {
+                if (it == 0L) System.currentTimeMillis() else Math.abs(it) + System.currentTimeMillis() % 10000
+            }
+            val generatedBmp = fetchPollinationsImage(textPrompt, seed)
+                ?: return@withContext Result.failure(
+                    Exception("Generation failed. Please check your internet connection.")
+                )
+            Result.success(generatedBmp)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "generateWithPhotoAndPrompt failed: ${e.message}")
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Analyzes the uploaded photo to extract EXACT gender + appearance.
+     * This runs BEFORE any generation so gender is never lost.
+     */
+    private suspend fun analyzePersonDetailed(base64Image: String): PersonInfo {
+        val raw = runCatching {
+            val req = GeminiRequest(
+                contents = listOf(
+                    GeminiContent(
+                        role = "user",
+                        parts = listOf(
+                            GeminiPart(inlineData = GeminiInlineData("image/jpeg", base64Image)),
+                            GeminiPart(
+                                text = """Look at this photo carefully and answer in EXACTLY this format:
+GENDER: [write only the word: male  OR  female]
+DESC: [2-3 sentences starting with "A male" or "A female" describing: estimated age range, exact hair color and style (length, curly/straight/wavy), exact skin tone, eye color if visible, face shape (oval/round/square/heart), distinctive facial features (strong jaw, high cheekbones, sharp nose, etc.), any facial hair for males, expression, and overall look]
+
+Example for a man:
+GENDER: male
+DESC: A male in his early 30s with short neat black hair, medium-warm brown skin, dark brown almond-shaped eyes, a strong square jaw, and a light beard stubble. He has a broad nose, prominent cheekbones, and a serious focused expression.
+
+Example for a woman:
+GENDER: female
+DESC: A female in her mid-20s with long wavy golden-blonde hair, fair porcelain skin, bright blue eyes, high defined cheekbones, and a delicate pointed chin. She has full lips, a straight refined nose, and a warm natural smile.
+
+Be very specific — your description will be used to generate an AI portrait that must look like this exact person.
+
+Now analyze the photo:"""
+                            )
+                        )
+                    )
+                )
+            )
+            geminiApi.generatePrompt(BuildConfig.GEMINI_API_KEY, req)
+        }.getOrNull()?.body()
+            ?.candidates?.firstOrNull()
+            ?.content?.parts?.firstOrNull { it.text != null }
+            ?.text?.trim() ?: ""
+
+        Log.d(TAG, "Raw analysis: $raw")
+
+        val genderMatch = Regex("GENDER:\\s*(male|female)", RegexOption.IGNORE_CASE).find(raw)
+        val descMatch   = Regex("DESC:\\s*(.+)", RegexOption.IGNORE_CASE).find(raw)
+
+        val gender = genderMatch?.groupValues?.getOrNull(1)?.lowercase()?.trim() ?: "person"
+        val desc   = descMatch?.groupValues?.getOrNull(1)?.trim()?.replace("\n", " ") ?: "A ${gender} person"
+
+        return PersonInfo(gender = gender, description = desc)
+    }
+
+    /** Strips the leading style:xxx | tag from a card prompt before sending to Gemini. */
+    private fun cleanStyleTag(prompt: String) =
+        prompt.replace(Regex("^style:\\w+\\s*\\|\\s*"), "").trim()
+
+    /**
+     * Builds the image-to-image prompt for Gemini.
+     * Asks Gemini to generate a FULL BODY image in the chosen art style,
+     * using the uploaded photo's face as identity reference.
+     */
+    private fun buildGenderLockedEditPrompt(person: PersonInfo, stylePrompt: String): String {
+        val genderWord = if (person.gender == "female") "woman" else "man"
+        val opposite   = if (person.gender == "female") "male" else "female"
+        val cleanPrompt = cleanStyleTag(stylePrompt)
+        return """Look at the face in the uploaded photo. Use that person's face as the identity for a brand new full body AI-generated image described below.
+
+PERSON: ${person.gender}, ${person.description}
+
+GENERATE THIS:
+$cleanPrompt
+
+CRITICAL REQUIREMENTS:
+1. FULL BODY: Generate the COMPLETE figure from head to feet. Show the entire body, outfit, and background. NOT a headshot.
+2. FACE IDENTITY: The generated character's face must match the uploaded person's face — same face shape, bone structure, eye shape and placement, nose shape, lip shape. The face is rendered entirely in the art style (painted, drawn, cinematic, etc.) — NOT copied as a photo.
+3. NATURAL INTEGRATION: The face, body, hair, clothes, and background must all be generated together as one cohesive image. The face must naturally fit the character's head and body with correct proportions, perspective, and lighting.
+4. GENDER: Always ${person.gender} ($genderWord). Never $opposite.
+5. STYLE: Invent the clothing, body pose, hair styling, and environment from scratch to match the requested style — do NOT reuse anything from the uploaded photo except the face identity."""
+    }
+
+    /**
+     * Builds the Gemini text-to-image fallback prompt (no input image).
+     * Requests a full body image using the person's description + style.
+     */
+    private fun buildTextPrompt(person: PersonInfo, stylePrompt: String): String {
+        val genderWord = if (person.gender == "female") "woman" else if (person.gender == "male") "man" else "person"
+        val cleanPrompt = cleanStyleTag(stylePrompt)
+        return "Full body AI generated portrait, complete figure from head to feet, standing. " +
+            "Subject: ${person.description}. " +
+            "$cleanPrompt. " +
+            "The face, body, clothing, hair, and background are all part of one cohesive AI-generated image. " +
+            "Face naturally fits the character's head — correct size, perspective, and lighting. " +
+            "Entire body visible including feet. ${person.gender} $genderWord. High quality detailed art."
+    }
+
+    /** Extracts scene/style keywords from a card prompt, stripping the style tag. */
+    private fun extractStyleKeywords(stylePrompt: String): String {
+        val cleaned = cleanStyleTag(stylePrompt)
+        return if (cleaned.length > 400) cleaned.substring(0, 400) else cleaned
+    }
+
+    /**
+     * Pure text-to-image generation — no user photo required.
+     * Tries Gemini image generation models first (same quality as Gemini app),
+     * then falls back to Pollinations.ai (free, no API key needed).
+     */
+    suspend fun generateTextToImage(
+        prompt: String,
+        onStatusUpdate: (String) -> Unit = {}
+    ): Result<Bitmap> = withContext(Dispatchers.IO) {
+        try {
+            onStatusUpdate("Generating AI art...")
+
+            // 1. Try Gemini text-to-image models (free tier available)
+            val geminiRequest = GeminiRequest(
+                contents = listOf(
+                    GeminiContent(
+                        role = "user",
+                        parts = listOf(GeminiPart(text = prompt))
+                    )
+                ),
+                generationConfig = GeminiGenerationConfig(responseModalities = listOf("IMAGE", "TEXT"))
+            )
+            for (modelId in GEMINI_IMAGE_MODEL_CHAIN) {
+                onStatusUpdate("Generating AI image...")
+                val url = "${GEMINI_BASE}v1beta/models/$modelId:generateContent"
+                val response = runCatching {
+                    geminiApi.generateGeminiImage(url, BuildConfig.GEMINI_API_KEY, geminiRequest)
+                }.getOrElse { Log.w(TAG, "T2I $modelId error: ${it.message}"); null } ?: continue
+
+                if (response.isSuccessful) {
+                    val base64 = response.body()
+                        ?.candidates?.firstOrNull()
+                        ?.content?.parts?.firstOrNull { it.inlineData != null }
+                        ?.inlineData?.data
+                    if (base64 != null) {
+                        val bytes = Base64.decode(base64, Base64.DEFAULT)
+                        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        if (bmp != null) {
+                            Log.d(TAG, "T2I success with $modelId")
+                            return@withContext Result.success(bmp)
+                        }
+                    }
+                    Log.w(TAG, "T2I $modelId — no image in response")
+                } else {
+                    Log.w(TAG, "T2I $modelId → ${response.code()}: ${response.errorBody()?.string()}")
+                }
+            }
+
+            // 2. Try Imagen text-to-image (paid tier)
+            val imagenRequest = ImagenRequest(
+                instances = listOf(ImagenInstance(prompt = prompt)),
+                parameters = ImagenParameters(sampleCount = 1)
+            )
+            for (modelId in IMAGEN_MODEL_CHAIN) {
+                onStatusUpdate("Trying Imagen model...")
+                val url = "${GEMINI_BASE}v1beta/models/$modelId:predict"
+                val response = runCatching {
+                    geminiApi.predictImagen(url, BuildConfig.GEMINI_API_KEY, imagenRequest)
+                }.getOrElse { Log.w(TAG, "$modelId error: ${it.message}"); null } ?: continue
+
+                if (response.isSuccessful) {
+                    val base64 = response.body()?.predictions?.firstOrNull()?.bytesBase64Encoded
+                    if (base64 != null) {
+                        val bytes = Base64.decode(base64, Base64.DEFAULT)
+                        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        if (bmp != null) return@withContext Result.success(bmp)
+                    }
+                }
+            }
+
+            // 3. Pollinations.ai free fallback (no API key, always works)
+            onStatusUpdate("Rendering with AI...")
+            val bmp = fetchPollinationsImage(prompt)
+                ?: return@withContext Result.failure(Exception("All generation methods failed. Check your internet connection."))
+            Result.success(bmp)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "generateTextToImage failed: ${e.message}")
+            Result.failure(e)
+        }
+    }
 
     suspend fun generateImage(
         sourceBitmap: Bitmap,
@@ -178,7 +500,7 @@ class GeminiRepository(
         onStatusUpdate: (String) -> Unit
     ): Bitmap? {
 
-        // Step 1: Describe person using free Gemini text model
+        // Step 1: Get a very detailed face+appearance description to guide generation
         onStatusUpdate("Analyzing your photo...")
         val personDescription = runCatching {
             val req = GeminiRequest(
@@ -188,9 +510,11 @@ class GeminiRepository(
                         parts = listOf(
                             GeminiPart(inlineData = GeminiInlineData("image/jpeg", base64Image)),
                             GeminiPart(
-                                text = "Describe the person in this photo for a portrait prompt. " +
-                                    "Include gender, age range, hair color and style, eye color, skin tone, " +
-                                    "facial structure. 2 sentences max. Start with 'A [age] [gender] with...'"
+                                text = "Describe the person in this photo in precise detail for AI image generation. " +
+                                    "Include: gender, estimated age, exact hair color and style (length/texture/waves), " +
+                                    "skin tone, eye color, face shape (oval/round/square/heart), " +
+                                    "distinctive facial features (strong jaw, high cheekbones, sharp nose, full lips, etc.). " +
+                                    "3 sentences max. Start with 'A [gender] in their [age range] with...'"
                             )
                         )
                     )
@@ -204,31 +528,36 @@ class GeminiRepository(
 
         Log.d(TAG, "Person description: $personDescription")
 
-        // Step 2: Build a short, focused Pollinations prompt (shorter = more reliable)
-        // Extract only the scene/style keywords from the template prompt
+        // Step 2: Build full body prompt — person description drives who appears,
+        // scene keywords drive the style, body, clothes, and background.
         val sceneKeywords = extractSceneKeywords(prompt)
-        val pollinationsPrompt = "$personDescription, $sceneKeywords, " +
-            "close-up portrait head and shoulders, face centered in frame, " +
-            "photorealistic DSLR photo, 85mm lens, professional photography"
+        val pollinationsPrompt = "Full body character portrait from head to feet, complete standing figure. " +
+            "Subject: $personDescription. $sceneKeywords. " +
+            "Entire body visible, face centered at top quarter of image. " +
+            "Face, body, clothes, and background are all part of the same cohesive AI generated artwork. " +
+            "High quality, detailed art."
 
-        // Step 3: Generate styled scene with Pollinations (try each model until one works)
-        onStatusUpdate("Generating AI portrait...")
-        val generatedBitmap = fetchPollinationsImage(pollinationsPrompt) ?: return null
-
-        // Step 4: Paste the original face over the generated image to preserve identity
-        onStatusUpdate("Applying your face...")
-        val result = transferFace(sourceBitmap, generatedBitmap)
-        // Only recycle if transferFace returned a NEW bitmap (not the same reference on exception)
-        if (result !== generatedBitmap) generatedBitmap.recycle()
-        return result
+        // Step 3: Generate the complete full-body image from text.
+        // Face, body, clothes, and background are all generated together — they naturally
+        // match in proportion, lighting, and style. No paste needed.
+        val seed = sourceBitmap.hashCode().toLong().let {
+            Math.abs(if (it == 0L) System.currentTimeMillis() else it + System.currentTimeMillis() % 10000)
+        }
+        onStatusUpdate("Generating full body AI image...")
+        return fetchPollinationsImage(pollinationsPrompt, seed)
     }
 
-    private fun fetchPollinationsImage(prompt: String): Bitmap? {
+    private fun fetchPollinationsImage(
+        prompt: String,
+        seed: Long = System.currentTimeMillis(),
+        width: Int = 768,
+        height: Int = 1024
+    ): Bitmap? {
         val encoded = java.net.URLEncoder.encode(prompt, "UTF-8")
         for (model in POLLINATIONS_MODELS) {
             val url = "https://image.pollinations.ai/prompt/$encoded" +
-                "?width=1024&height=1024&nologo=true&model=$model"
-            Log.d(TAG, "Pollinations [$model] requesting...")
+                "?width=$width&height=$height&nologo=true&model=$model&seed=$seed"
+            Log.d(TAG, "Pollinations [$model] ${width}x${height} seed=$seed")
             val bmp = tryFetchBitmap(url, model)
             if (bmp != null) return bmp
         }
@@ -261,158 +590,30 @@ class GeminiRepository(
         }
     }
 
-    // ── Face transfer ─────────────────────────────────────────────────────────
+    // ── (face transfer removed — Gemini image-to-image handles face matching natively) ───────
 
-    private data class FaceInfo(val cx: Float, val cy: Float, val eyeDist: Float)
-
-    /**
-     * Detect face in the SOURCE (user's real photo) using Android FaceDetector.
-     * Falls back to upper-center heuristic if detection fails.
-     */
-    @Suppress("DEPRECATION")
-    private fun detectSourceFace(bitmap: Bitmap): FaceInfo {
-        return try {
-            val bmp565 = bitmap.copy(Bitmap.Config.RGB_565, false)
-            val detector = android.media.FaceDetector(bmp565.width, bmp565.height, 1)
-            val faces = arrayOfNulls<android.media.FaceDetector.Face>(1)
-            val found = detector.findFaces(bmp565, faces)
-            bmp565.recycle()
-            if (found > 0 && faces[0] != null) {
-                val mid = PointF()
-                faces[0]!!.getMidPoint(mid)
-                Log.d(TAG, "Source face detected: cx=${mid.x} cy=${mid.y} eyeDist=${faces[0]!!.eyesDistance()}")
-                FaceInfo(mid.x, mid.y, faces[0]!!.eyesDistance())
-            } else {
-                Log.d(TAG, "Source face not detected — using heuristic")
-                FaceInfo(bitmap.width * 0.50f, bitmap.height * 0.37f, bitmap.width * 0.22f)
-            }
-        } catch (e: Exception) {
-            FaceInfo(bitmap.width * 0.50f, bitmap.height * 0.37f, bitmap.width * 0.22f)
-        }
-    }
-
-    /**
-     * Transfers the face from [source] onto [generated].
-     *
-     * For the generated image we use a FIXED portrait heuristic instead of
-     * trying to detect the face — Pollinations portrait prompts reliably place
-     * the face centered at ~34% height, so detection is not needed and would
-     * be unreliable on AI images anyway.
-     */
-    private fun transferFace(source: Bitmap, generated: Bitmap): Bitmap {
-        return try {
-            val srcFace = detectSourceFace(source)
-
-            // Fixed heuristic for Pollinations portrait output
-            val genFace = FaceInfo(
-                cx = generated.width * 0.50f,
-                cy = generated.height * 0.34f,
-                eyeDist = generated.width * 0.26f
-            )
-
-            val scale = genFace.eyeDist / srcFace.eyeDist
-
-            // Extract face patch from source with generous padding (forehead + chin + cheeks)
-            val pad = srcFace.eyeDist * 2.2f
-            val left   = (srcFace.cx - pad).toInt().coerceAtLeast(0)
-            val top    = (srcFace.cy - pad * 1.4f).toInt().coerceAtLeast(0)
-            val right  = (srcFace.cx + pad).toInt().coerceAtMost(source.width)
-            val bottom = (srcFace.cy + pad * 1.6f).toInt().coerceAtMost(source.height)
-
-            val patchW = (right - left).coerceAtLeast(1)
-            val patchH = (bottom - top).coerceAtLeast(1)
-            val patch  = Bitmap.createBitmap(source, left, top, patchW, patchH)
-
-            // Scale patch to match generated face size
-            val scaledW = (patchW * scale).toInt().coerceAtLeast(1)
-            val scaledH = (patchH * scale).toInt().coerceAtLeast(1)
-            val scaled  = Bitmap.createScaledBitmap(patch, scaledW, scaledH, true)
-            patch.recycle()
-
-            // Eye centre position inside the scaled patch
-            val eyeInPatchX = (srcFace.cx - left) * scale
-            val eyeInPatchY = (srcFace.cy - top)  * scale
-
-            // Paste position — align eye centres between source and generated
-            val pasteX = genFace.cx - eyeInPatchX
-            val pasteY = genFace.cy - eyeInPatchY
-
-            // Apply feathered ellipse mask so edges blend into generated background
-            val masked = applyFeatheredEllipseMask(scaled, genFace.eyeDist * scale)
-            scaled.recycle()
-
-            // Composite masked face onto generated image
-            val result = generated.copy(Bitmap.Config.ARGB_8888, true)
-            Canvas(result).drawBitmap(masked, pasteX, pasteY, null)
-            masked.recycle()
-
-            Log.d(TAG, "Face transfer done — paste=(${pasteX.toInt()},${pasteY.toInt()}) scale=%.2f".format(scale))
-            result
-        } catch (e: Exception) {
-            Log.e(TAG, "transferFace error: ${e.message}", e)
-            generated
-        }
-    }
-
-    /**
-     * Returns [face] with alpha that fades to 0 outside a face-shaped ellipse.
-     * Centre is placed at the eye line (43% down), giving natural room for
-     * forehead above and chin below.
-     */
-    private fun applyFeatheredEllipseMask(face: Bitmap, eyeDistInPatch: Float): Bitmap {
-        val w  = face.width
-        val h  = face.height
-        val cx = w * 0.50f
-        val cy = h * 0.43f                                           // eye line ~43% down in patch
-        val rx = (eyeDistInPatch * 1.75f).coerceAtMost(w * 0.49f)
-        val ry = (eyeDistInPatch * 2.30f).coerceAtMost(h * 0.49f)
-
-        // Mask: radial gradient opaque → transparent, clipped to ellipse
-        val mask = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val mc   = Canvas(mask)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            shader = RadialGradient(
-                cx, cy, maxOf(rx, ry),
-                intArrayOf(Color.WHITE, Color.WHITE, 0x00FFFFFF),
-                floatArrayOf(0f, 0.70f, 1.0f),
-                Shader.TileMode.CLAMP
-            )
-        }
-        mc.clipPath(Path().apply {
-            addOval(cx - rx, cy - ry, cx + rx, cy + ry, Path.Direction.CW)
-        })
-        mc.drawRect(0f, 0f, w.toFloat(), h.toFloat(), paint)
-
-        // DST_IN: keep face pixels where mask is opaque, transparent where mask fades
-        val result = face.copy(Bitmap.Config.ARGB_8888, true)
-        Canvas(result).drawBitmap(mask, 0f, 0f, Paint().apply {
-            xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
-        })
-        mask.recycle()
-        return result
-    }
 
     // ── Prompt helpers ────────────────────────────────────────────────────────
 
     /**
      * Extracts the core scene/style keywords from the full template prompt
      * to keep the Pollinations URL short and focused.
+     * Strips the leading style:xxx tag and any identity-preservation boilerplate.
      */
     private fun extractSceneKeywords(templatePrompt: String): String {
-        // Remove the identity-preservation header boilerplate, keep the scene description
-        val cleaned = templatePrompt
+        val cleaned = cleanStyleTag(templatePrompt)
+            .replace(Regex("Only the face must match.*?\\.\\s*", RegexOption.DOT_MATCHES_ALL), "")
             .replace(Regex("Use the provided image.*?described\\.\\s*", RegexOption.DOT_MATCHES_ALL), "")
             .replace(Regex("Preserve the exact.*?\\.\\s*"), "")
             .replace(Regex("Do not change.*?\\.\\s*"), "")
             .trim()
-        // Limit to ~200 chars so URL stays reasonable
-        return if (cleaned.length > 200) cleaned.substring(0, 200) else cleaned
+        return if (cleaned.length > 220) cleaned.substring(0, 220) else cleaned
     }
 
     private fun buildEditPrompt(templatePrompt: String): String =
-        """Edit this portrait photo. Keep the person's face, eyes, nose, mouth, expression, skin tone and hair EXACTLY the same. Only change the background, environment, clothing and lighting as described below.
+        """Completely transform this portrait photo into the following art style. Apply the style to the ENTIRE image — including the face, hair, skin texture, and expression — so the whole image is rendered in the art style.
 
 $templatePrompt
 
-Output must look like a real DSLR photograph. Photorealistic, not illustration, not painting."""
+IMPORTANT: While transforming the full image into the art style, keep the person's identity recognizable — preserve the same face shape, bone structure, eye placement, nose shape, and distinctive features. The result should look like a fully styled artwork of this specific person — not a photo with a background swap."""
 }

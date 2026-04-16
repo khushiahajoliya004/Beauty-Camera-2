@@ -7,152 +7,229 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.beautycamera.data.repository.GeminiRepository
 import com.beautycamera.data.repository.PhotoRepository
-// import com.beautycamera.data.repository.SDRepository  // commented out — using Gemini instead
-import com.beautycamera.domain.model.AIStyleTemplate
+import com.beautycamera.domain.model.AIArtCard
 import com.beautycamera.util.BitmapUtils
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
-data class AIGeneratorUiState(
-    val selectedBitmap: Bitmap? = null,
-    val resultBitmap: Bitmap? = null,
-    val templates: List<AIStyleTemplate> = emptyList(),
-    val selectedTemplate: AIStyleTemplate? = null,
+data class AIArtUiState(
+    val cards: List<AIArtCard> = emptyList(),
+    val selectedPhoto: Bitmap? = null,        // user's uploaded/captured photo
+    val selectedCard: AIArtCard? = null,      // chosen style
+    val resultBitmap: Bitmap? = null,         // AI-generated result
     val isGenerating: Boolean = false,
-    val statusMessage: String = "",
     val progress: Float = 0f,
+    val statusMessage: String = "",
     val errorMessage: String? = null,
-    val isSaved: Boolean = false
+    val isSaved: Boolean = false,
+    val shuffleCount: Int = 0
 )
 
 @HiltViewModel
 class AIGeneratorViewModel @Inject constructor(
     private val geminiRepository: GeminiRepository,
-    // private val sdRepository: SDRepository,  // commented out — using Gemini instead
-    private val bitmapUtils: BitmapUtils,
-    private val photoRepository: PhotoRepository
+    private val photoRepository: PhotoRepository,
+    private val bitmapUtils: BitmapUtils
 ) : ViewModel() {
 
-    private val _uiState = MutableStateFlow(AIGeneratorUiState())
-    val uiState: StateFlow<AIGeneratorUiState> = _uiState.asStateFlow()
+    private val _uiState = MutableStateFlow(AIArtUiState())
+    val uiState: StateFlow<AIArtUiState> = _uiState.asStateFlow()
 
-    init { loadTemplates() }
+    private var generationJob: Job? = null
 
-    private fun loadTemplates() {
-        val templates = listOf(
-            AIStyleTemplate(id = "golden_hour_rooftop",    name = "Golden Hour Rooftop",
-                prompt = "Use the provided image of the person. Preserve the exact same face, identity, facial features, and expression. Do not change the person's appearance, gender, or identity. Only modify the environment, lighting, clothing, and style as described. Place the person on a modern city rooftop during golden hour. Warm sunlight creates soft highlights and natural shadows on the face. Add a beige linen shirt with rolled sleeves. Background shows a softly blurred skyline with shallow depth of field. Cinematic lighting, 85mm lens, ultra realistic.",
-                negativePrompt = "ugly, deformed, blurry, low quality, cartoon, drawing, different person, changed face, changed identity, changed gender", thumbnailResId = 0),
-            AIStyleTemplate(id = "rainy_street_cinematic", name = "Rainy Street Cinematic",
-                prompt = "Use the provided image of the person. Preserve the exact same face, identity, facial features, and expression. Do not change the person's appearance, gender, or identity. Only modify the environment, lighting, clothing, and style as described. Place the person under a transparent umbrella on a rainy neon-lit street at night. Add a dark navy trench coat with slight rain droplets. Reflections of blue and magenta lights in puddles. Cinematic mood, soft bokeh, high detail.",
-                negativePrompt = "ugly, deformed, blurry, low quality, cartoon, drawing, different person, changed face, changed identity, changed gender", thumbnailResId = 0),
-            AIStyleTemplate(id = "minimal_studio",         name = "Minimal Studio Portrait",
-                prompt = "Use the provided image of the person. Preserve the exact same face, identity, facial features, and expression. Do not change the person's appearance, gender, or identity. Only modify the environment, lighting, clothing, and style as described. Place the person in a clean studio with matte gray background. Add a crisp white shirt. Use softbox lighting with even illumination and soft shadows. Ultra sharp focus on eyes, professional portrait style.",
-                negativePrompt = "ugly, deformed, blurry, low quality, cartoon, drawing, different person, changed face, changed identity, changed gender", thumbnailResId = 0),
-            AIStyleTemplate(id = "outdoor_forest",         name = "Outdoor Forest Light",
-                prompt = "Use the provided image of the person. Preserve the exact same face, identity, facial features, and expression. Do not change the person's appearance, gender, or identity. Only modify the environment, lighting, clothing, and style as described. Place the person in a lush green forest with sunlight filtering through leaves. Add an olive green jacket over a t-shirt. Natural light patterns on face, soft background blur.",
-                negativePrompt = "ugly, deformed, blurry, low quality, cartoon, drawing, different person, changed face, changed identity, changed gender", thumbnailResId = 0),
-            AIStyleTemplate(id = "coffee_shop",            name = "Coffee Shop Lifestyle",
-                prompt = "Use the provided image of the person. Preserve the exact same face, identity, facial features, and expression. Do not change the person's appearance, gender, or identity. Only modify the environment, lighting, clothing, and style as described. Place the person in a cozy coffee shop near a window. Add a brown textured sweater and a coffee mug in hand. Warm lighting, soft background blur with plants and shelves.",
-                negativePrompt = "ugly, deformed, blurry, low quality, cartoon, drawing, different person, changed face, changed identity, changed gender", thumbnailResId = 0),
-            AIStyleTemplate(id = "formal_editorial",       name = "Formal Editorial Look",
-                prompt = "Use the provided image of the person. Preserve the exact same face, identity, facial features, and expression. Do not change the person's appearance, gender, or identity. Only modify the environment, lighting, clothing, and style as described. Dress the person in a charcoal suit with black shirt. Place against a dark gradient background with dramatic side lighting. High-end fashion editorial look, strong contrast.",
-                negativePrompt = "ugly, deformed, blurry, low quality, cartoon, drawing, different person, changed face, changed identity, changed gender", thumbnailResId = 0),
-            AIStyleTemplate(id = "beach_sunset",           name = "Beach Sunset Portrait",
-                prompt = "Use the provided image of the person. Preserve the exact same face, identity, facial features, and expression. Do not change the person's appearance, gender, or identity. Only modify the environment, lighting, clothing, and style as described. Place the person on a beach at sunset with golden-orange lighting. Add a light blue open shirt. Slight wind effect in hair, ocean background softly blurred.",
-                negativePrompt = "ugly, deformed, blurry, low quality, cartoon, drawing, different person, changed face, changed identity, changed gender", thumbnailResId = 0),
-            AIStyleTemplate(id = "urban_daylight",         name = "Urban Daylight Street Style",
-                prompt = "Use the provided image of the person. Preserve the exact same face, identity, facial features, and expression. Do not change the person's appearance, gender, or identity. Only modify the environment, lighting, clothing, and style as described. Place the person walking on a modern city street. Add a black leather jacket and sunglasses slightly lowered. Motion blur background, sharp subject focus.",
-                negativePrompt = "ugly, deformed, blurry, low quality, cartoon, drawing, different person, changed face, changed identity, changed gender", thumbnailResId = 0),
-            AIStyleTemplate(id = "low_key_portrait",       name = "Artistic Low-Key Portrait",
-                prompt = "Use the provided image of the person. Preserve the exact same face, identity, facial features, and expression. Do not change the person's appearance, gender, or identity. Only modify the environment, lighting, clothing, and style as described. Create a low-key portrait with one side of the face lit and the other in shadow. Black background. Dramatic cinematic lighting, high contrast.",
-                negativePrompt = "ugly, deformed, blurry, low quality, cartoon, drawing, different person, changed face, changed identity, changed gender", thumbnailResId = 0),
-            AIStyleTemplate(id = "home_interior",          name = "Home Interior Natural Light",
-                prompt = "Use the provided image of the person. Preserve the exact same face, identity, facial features, and expression. Do not change the person's appearance, gender, or identity. Only modify the environment, lighting, clothing, and style as described. Place the person indoors near a window with soft daylight. Add a simple white t-shirt. Minimal background with plants and neutral tones. Warm and natural mood.",
-                negativePrompt = "ugly, deformed, blurry, low quality, cartoon, drawing, different person, changed face, changed identity, changed gender", thumbnailResId = 0)
+    init { loadCards() }
+
+    private fun loadCards() {
+        val cards = listOf(
+            AIArtCard(
+                id = "ai_enhanced",
+                name = "AI Enhanced",
+                emoji = "✨",
+                description = "Full body AI portrait",
+                cardColor = 0xFFAD1457,
+                prompt = "style:realistic | Generate a full body AI-enhanced portrait from head to toe of this person. Show the complete figure standing: polished skin, refined hair, elegant smart-casual or formal clothing. Soft professional studio lighting. Clean neutral gradient background. Entire body visible. Only the face must match the uploaded image exactly — same face shape, bone structure, eyes, nose, lips. Photorealistic, high-end beauty photography quality."
+            ),
+            AIArtCard(
+                id = "cinematic",
+                name = "Cinematic",
+                emoji = "🎬",
+                description = "Full body cinematic scene",
+                cardColor = 0xFF1A237E,
+                prompt = "style:cinematic | Generate a full body cinematic movie-still of this person, head to toe. The complete figure stands in a dramatic urban or moody indoor scene. Stylish protagonist clothing — leather jacket, trench coat, or dramatic outfit. Orange-teal Hollywood film color grade. Dramatic side rim lighting. Shallow depth of field background. Only the face must match the uploaded image: same face shape, eyes, nose, lips, bone structure. Film photography quality."
+            ),
+            AIArtCard(
+                id = "sci_fi",
+                name = "Sci-Fi",
+                emoji = "🔮",
+                description = "Full body sci-fi character",
+                cardColor = 0xFF0D47A1,
+                prompt = "style:scifi | Generate a full body futuristic sci-fi character portrait, head to toe. The complete figure wears a sleek glowing battle suit or technological armor with neon accents. Dark sci-fi environment background — space station corridor, neon-lit futuristic city. Cool blue and cyan holographic lighting across the entire body and face. Only the face must match the uploaded image: same face shape, eyes, nose, lips, bone structure. High-end sci-fi concept art quality."
+            ),
+            AIArtCard(
+                id = "oil_painting",
+                name = "Oil Painting",
+                emoji = "🎨",
+                description = "Full body oil painting",
+                cardColor = 0xFF4E342E,
+                prompt = "style:oilpainting | Create a full body classical oil painting in Rembrandt style, showing the complete figure from head to toe. The person wears rich Renaissance or Baroque aristocratic clothing — robes, doublet, or period gown. Grand interior hall or landscape background painted with visible oil brushwork. Warm chiaroscuro lighting. The ENTIRE painting — body, clothing, background, AND face — rendered in oil paint with fine brushwork. Only the face structure must match the uploaded image: same face shape, eyes, nose, lips."
+            ),
+            AIArtCard(
+                id = "van_gogh",
+                name = "Van Gogh",
+                emoji = "🌻",
+                description = "Full body Van Gogh painting",
+                cardColor = 0xFF1565C0,
+                prompt = "style:vangogh | Paint a full body portrait in Vincent van Gogh's style, the complete figure head to toe. Simple period or peasant clothing with bold swirling Van Gogh brushstrokes across the clothing and body. Vivid swirling countryside or starry night background with thick impasto paint. The ENTIRE image — body, clothes, background, AND face — painted with Van Gogh's cobalt blue, golden yellow, deep green palette and visible swirling brushstrokes. Only the face structure must match the uploaded image: same face shape, eyes, nose, lips."
+            ),
+            AIArtCard(
+                id = "watercolor",
+                name = "Watercolor",
+                emoji = "💧",
+                description = "Full body watercolor art",
+                cardColor = 0xFF00838F,
+                prompt = "style:watercolor | Create a full body watercolor illustration, the complete figure from head to toe. The person wears light, elegant or casual clothing — flowy dress, linen shirt — rendered in delicate watercolor washes. Soft nature or abstract watercolor background with visible white paper texture and color bleeding at edges. The ENTIRE figure including face painted as watercolor with transparent washes and soft edges. Only the face structure must match the uploaded image: same face shape, eyes, nose, lips."
+            ),
+            AIArtCard(
+                id = "pencil_sketch",
+                name = "Pencil Sketch",
+                emoji = "✏️",
+                description = "Full body pencil drawing",
+                cardColor = 0xFF37474F,
+                prompt = "style:pencilsketch | Draw a full body graphite pencil portrait on white paper, the complete figure from head to toe. The entire person — face, hair, clothing, body — drawn with detailed pencil shading, fine lines, and cross-hatching for shadow areas. Casual or simple clothing rendered in pencil strokes. White paper background with light sketch lines. The ENTIRE figure is pencil drawing — no color. Only the face structure must match the uploaded image: same face shape, eyes, nose, lips. Artist-quality graphite."
+            ),
+            AIArtCard(
+                id = "anime",
+                name = "Anime Style",
+                emoji = "🌸",
+                description = "Full body anime character",
+                cardColor = 0xFF6A0DAD,
+                prompt = "style:anime | Generate a full body anime character illustration, the complete figure from head to toe. The person is an anime character wearing a detailed anime outfit — stylish school uniform, fantasy armor, traditional Japanese clothing, or modern anime fashion. Vibrant anime background: sky with clouds, anime cityscape, cherry blossom park, or fantasy landscape. The ENTIRE body, clothing, hair, and background are in high-quality anime art style. The face is drawn in anime style with large expressive eyes, smooth cel-shaded skin, clean linework — but the face SHAPE, eye positions, nose position, and mouth position must match the uploaded image so the person is recognizable as the same individual as an anime character."
+            ),
+            AIArtCard(
+                id = "golden_hour",
+                name = "Golden Hour",
+                emoji = "🌅",
+                description = "Full body golden hour photo",
+                cardColor = 0xFFE65100,
+                prompt = "style:goldenhour | Generate a full body golden hour outdoor photography portrait from head to toe. The complete figure stands in a beautiful outdoor location — golden wheat field, beach, forest path, or meadow — wearing casual summer or outdoor clothing. Warm golden orange sunlight from behind creating a glowing rim light in the hair and shoulders. Soft bokeh of trees, grass, or nature blurred in background. Entire body visible with warm golden light. Only the face must match the uploaded image: same face shape, eyes, nose, lips, bone structure. Natural DSLR photography quality."
+            ),
+            AIArtCard(
+                id = "studio_pro",
+                name = "Studio Pro",
+                emoji = "📸",
+                description = "Full body professional photo",
+                cardColor = 0xFF212121,
+                prompt = "style:studio | Generate a full body professional studio portrait from head to toe. The complete figure stands wearing formal business attire — suit and tie, blazer, professional dress. Clean seamless neutral grey or white background. Professional three-point studio lighting: softbox key light, fill light, rim light. Full body visible from head to feet. Only the face must match the uploaded image: same face shape, eyes, nose, lips, bone structure. Premium corporate/LinkedIn photography quality."
+            )
         )
-        _uiState.value = _uiState.value.copy(templates = templates)
+        _uiState.value = _uiState.value.copy(cards = cards)
     }
 
-    fun loadImage(context: Context, uri: Uri) {
+    fun loadImageFromGallery(context: Context, uri: Uri) {
         viewModelScope.launch {
             val bitmap = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 bitmapUtils.uriToBitmap(context, uri)
             }
-            bitmap?.let {
+            if (bitmap != null) {
                 _uiState.value = _uiState.value.copy(
-                    selectedBitmap = it,
+                    selectedPhoto = bitmap,
                     resultBitmap = null,
-                    isSaved = false
+                    isSaved = false,
+                    errorMessage = null,
+                    shuffleCount = 0
                 )
             }
         }
     }
 
-    fun selectTemplate(template: AIStyleTemplate) {
-        _uiState.value = _uiState.value.copy(selectedTemplate = template)
+    fun loadImageFromCamera(bitmap: Bitmap) {
+        _uiState.value = _uiState.value.copy(
+            selectedPhoto = bitmap,
+            resultBitmap = null,
+            isSaved = false,
+            errorMessage = null,
+            shuffleCount = 0
+        )
+    }
+
+    fun selectCard(card: AIArtCard) {
+        _uiState.value = _uiState.value.copy(
+            selectedCard = card,
+            resultBitmap = null,
+            isSaved = false,
+            errorMessage = null,
+            shuffleCount = 0
+        )
     }
 
     fun generate() {
-        val bitmap   = _uiState.value.selectedBitmap   ?: return
-        val template = _uiState.value.selectedTemplate ?: return
+        val photo = _uiState.value.selectedPhoto ?: return
+        val card  = _uiState.value.selectedCard  ?: return
+        if (_uiState.value.isGenerating) return
+        startGeneration(photo, card)
+    }
 
-        viewModelScope.launch {
+    fun shuffle() {
+        val photo = _uiState.value.selectedPhoto ?: return
+        val card  = _uiState.value.selectedCard  ?: return
+        if (_uiState.value.isGenerating) return
+        _uiState.value = _uiState.value.copy(
+            resultBitmap = null,
+            isSaved = false,
+            errorMessage = null,
+            shuffleCount = _uiState.value.shuffleCount + 1
+        )
+        startGeneration(photo, card)
+    }
+
+    private fun startGeneration(photo: Bitmap, card: AIArtCard) {
+        generationJob?.cancel()
+        generationJob = viewModelScope.launch {
             _uiState.value = _uiState.value.copy(
                 isGenerating = true,
                 progress = 0f,
                 statusMessage = "Preparing...",
-                errorMessage = null,
-                resultBitmap = null,
-                isSaved = false
+                errorMessage = null
             )
 
+            // Animated progress
             val progressJob = launch {
                 var p = 0f
-                while (p < 0.99f) {
-                    // Fast phase 0→60% (~12 s), then slow phase 60→99% (~78 s)
-                    val delayMs = if (p < 0.60f) 800L else 2000L
-                    val step    = if (p < 0.60f) 0.04f else 0.01f
-                    kotlinx.coroutines.delay(delayMs)
-                    p = (p + step).coerceAtMost(0.99f)
-                    _uiState.value = _uiState.value.copy(
-                        progress = p,
-                        statusMessage = if (p >= 0.70f && _uiState.value.statusMessage == "Generating AI portrait...")
-                            "Still generating, please wait..." else _uiState.value.statusMessage
-                    )
+                while (p < 0.97f) {
+                    val delayMs = if (p < 0.55f) 700L else 2000L
+                    val step    = if (p < 0.55f) 0.04f else 0.01f
+                    delay(delayMs)
+                    p = (p + step).coerceAtMost(0.97f)
+                    _uiState.value = _uiState.value.copy(progress = p)
                 }
             }
 
-            // ── Old pipeline (Together AI / HuggingFace / Stability AI) — commented out ──
-            // val result = sdRepository.generateFromTemplate(
-            //     sourceBitmap = bitmap,
-            //     template = template,
-            //     onStatusUpdate = { msg ->
-            //         _uiState.value = _uiState.value.copy(statusMessage = msg)
-            //     }
-            // )
+            // Add slight variation on shuffle so the model gives a different output
+            val shuffleSuffix = if (_uiState.value.shuffleCount > 0)
+                "\n\nGenerate a fresh unique variation with different pose, lighting angle, or composition details."
+            else ""
 
-            // ── Gemini only ───────────────────────────────────────────────────────────────
-            val result = geminiRepository.generateImage(
-                sourceBitmap = bitmap,
-                template = template,
-                onStatusUpdate = { msg ->
-                    _uiState.value = _uiState.value.copy(statusMessage = msg)
-                }
+            val result = geminiRepository.generateWithPhotoAndPrompt(
+                sourceBitmap = photo,
+                stylePrompt = card.prompt + shuffleSuffix,
+                styleId = card.id,
+                onStatusUpdate = { msg -> _uiState.value = _uiState.value.copy(statusMessage = msg) }
             )
 
             progressJob.cancel()
 
             result.fold(
-                onSuccess = { resultBitmap ->
+                onSuccess = { bitmap ->
                     _uiState.value = _uiState.value.copy(
-                        resultBitmap = resultBitmap,
+                        resultBitmap = bitmap,
                         isGenerating = false,
-                        statusMessage = "Success!",
+                        statusMessage = "Done!",
                         progress = 1f
                     )
                 },
@@ -161,7 +238,7 @@ class AIGeneratorViewModel @Inject constructor(
                         isGenerating = false,
                         statusMessage = "",
                         progress = 0f,
-                        errorMessage = error.message ?: "Generation failed"
+                        errorMessage = error.message ?: "Generation failed. Please try again."
                     )
                 }
             )

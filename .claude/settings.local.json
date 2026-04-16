@@ -27,7 +27,15 @@
       "Bash(ipconfig)",
       "Bash(netsh advfirewall:*)",
       "Bash(awk '{print $5, $9}'])",
-      "Bash(HF_HOME=D:/HuggingFaceCache HUGGINGFACE_HUB_CACHE=D:/HuggingFaceCache/hub venv/Scripts/python.exe main.py)"
+      "Bash(HF_HOME=D:/HuggingFaceCache HUGGINGFACE_HUB_CACHE=D:/HuggingFaceCache/hub venv/Scripts/python.exe main.py)",
+      "Bash(chmod +x gradlew)",
+      "Bash(grep -r compose.animation /Users/priyanshupatel/Downloads/Beauty-Camera-2/app/build.gradle*)",
+      "Bash(pip3 --version)",
+      "Bash(sysctl -n machdep.cpu.brand_string)",
+      "Bash(system_profiler SPHardwareDataType)",
+      "Bash(ipconfig getifaddr:*)",
+      "Read(//Library/Frameworks/Python.framework/Versions/**)",
+      "Bash(brew list:*)"
     ]
   }
 }

@@ -52,6 +52,15 @@ data class AIStyleTemplate(
     val thumbnailResId: Int
 )
 
+data class AIArtCard(
+    val id: String,
+    val name: String,
+    val emoji: String,
+    val description: String,
+    val prompt: String,
+    val cardColor: Long   // ARGB hex for card gradient accent
+)
+
 data class BeautySettings(
     val skinSmoothing: Float = 0f,
     val lipColor: Int = android.graphics.Color.RED,

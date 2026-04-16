@@ -91,6 +91,13 @@ class GenerateRequest(BaseModel):
     height: int = 1024
 
 
+class TextToImageRequest(BaseModel):
+    prompt: str           # Full text prompt for AI art generation
+    quality: str = "high" # "high" (30 steps) or "fast" (20 steps)
+    width: int = 1024
+    height: int = 1024
+
+
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -194,6 +201,48 @@ def generate(req: GenerateRequest):
         "image": pil_to_base64(final),
         "generation_time_seconds": elapsed,
         "model_used": "sdxl_ip_adapter_faceid_v2",
+    }
+
+
+@app.post("/generate-art")
+def generate_art(req: TextToImageRequest):
+    """
+    Pure text-to-image endpoint — no user photo required.
+    Used by the AI Art Generator cards feature (10 style cards with shuffle).
+    """
+    if not loader.all_loaded:
+        raise HTTPException(status_code=503, detail="Models are still loading. Please retry in a moment.")
+
+    start = time.time()
+
+    negative_prompt = UNIVERSAL_NEGATIVE
+
+    steps = 30 if req.quality == "high" else 20
+    # Use the generator in text-to-image mode (no face embedding, no pose map)
+    generated = generator.generate_text2img(
+        prompt=req.prompt,
+        negative_prompt=negative_prompt,
+        width=req.width,
+        height=req.height,
+        steps=steps,
+    )
+
+    # Optionally enhance with GFPGAN if faces appear
+    enhanced = face_enhancer.enhance(generated, fidelity=0.4)
+
+    if loader.has_enough_memory(min_gb=6):
+        final = upscaler.upscale_then_downscale(enhanced, target_size=(req.width, req.height))
+    else:
+        final = enhanced
+
+    elapsed = round(time.time() - start, 1)
+    logger.info(f"Art generation complete in {elapsed}s | device={loader.device}")
+
+    return {
+        "success": True,
+        "image": pil_to_base64(final),
+        "generation_time_seconds": elapsed,
+        "model_used": "sdxl_text2img",
     }
 
 
