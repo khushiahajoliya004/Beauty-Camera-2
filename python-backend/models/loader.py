@@ -13,8 +13,8 @@ logger = logging.getLogger(__name__)
 class ModelLoader:
     def __init__(self):
         self.device = self._detect_device()
-        if self.device == "cuda":
-            self.dtype = torch.float16   # GPU: float16 is fastest
+        if self.device in ("cuda", "mps"):
+            self.dtype = torch.float16   # GPU: float16 is fastest (MPS doesn't support bfloat16)
         else:
             # CPU: bfloat16 halves RAM (13 GB → ~7 GB) AND is fully supported.
             # float16 on CPU fails for LayerNorm/GroupNorm ops; bfloat16 works.
