@@ -13,6 +13,7 @@ import com.beautycamera.util.CapturedBitmapHolder
 import com.beautycamera.util.MediaPipeHelper
 import com.beautycamera.util.OpenCVHelper
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -46,6 +47,7 @@ class BodyEditorViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(BodyEditorUiState())
     val uiState: StateFlow<BodyEditorUiState> = _uiState.asStateFlow()
+    private var effectJob: Job? = null
 
     /** Called when user takes a photo directly inside the editor. */
     fun loadBitmap(bitmap: Bitmap) {
@@ -132,7 +134,10 @@ class BodyEditorViewModel @Inject constructor(
         val original = _uiState.value.originalBitmap ?: return
         val pose = _uiState.value.poseLandmarks
         val settings = _uiState.value.bodySettings
-        viewModelScope.launch {
+
+        // Cancel previous in-flight job so slider changes don't queue up
+        effectJob?.cancel()
+        effectJob = viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isProcessing = true)
             val result = if (pose != null) {
                 openCVHelper.applyBodyReshapeWithPose(original, settings, pose)

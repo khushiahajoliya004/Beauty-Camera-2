@@ -37,21 +37,27 @@ import com.beautycamera.ui.theme.SurfaceDark
 import com.beautycamera.util.BitmapUtils
 import com.beautycamera.util.GPUImageHelper
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 data class FilterUiState(
     val filters: List<FilterModel> = emptyList(),
     val selectedIndex: Int = 0,
     val intensity: Float = 1.0f,
-    val originalBitmap: Bitmap? = null,
-    val processedBitmap: Bitmap? = null,
-    val isProcessing: Boolean = false,
+    val originalBitmap: Bitmap? = null,       // full-res, used only for saving
+    val previewBitmap: Bitmap? = null,         // small 400px, used for live preview
+    val processedBitmap: Bitmap? = null,       // what is shown on screen
+    val filterPreviews: List<Bitmap?> = emptyList(),     // 400px — shown in main preview area
+    val filterThumbnails: List<Bitmap?> = emptyList(),  // 80px  — shown in filter strip
+    val isProcessing: Boolean = false,         // only true when saving
+    val isPreviewing: Boolean = false,         // true while generating previews
     val isSaved: Boolean = false
 )
 
@@ -73,45 +79,112 @@ class FilterViewModel @Inject constructor(
             val bitmap = try {
                 bitmapUtils.uriToBitmap(context, Uri.parse(Uri.decode(imagePath)))
             } catch (e: Exception) { null } ?: return@launch
-            val scaled = bitmapUtils.scaleBitmap(bitmap, 1080, 1920)
-            _uiState.value = _uiState.value.copy(originalBitmap = scaled, processedBitmap = scaled.copy(Bitmap.Config.ARGB_8888, true))
-            applyFilter() // Apply default filter (Natural)
+
+            val fullRes = bitmapUtils.scaleBitmap(bitmap, 1080, 1920)
+            // 400px for main preview display
+            val preview = bitmapUtils.scaleBitmap(bitmap, 400, 400)
+            // 80px for strip thumbnails — tiny, fast to process and render
+            val thumb = bitmapUtils.scaleBitmap(bitmap, 80, 80)
+
+            _uiState.value = _uiState.value.copy(
+                originalBitmap = fullRes,
+                previewBitmap = preview,
+                processedBitmap = preview.copy(Bitmap.Config.ARGB_8888, true),
+                isPreviewing = true
+            )
+
+            generateAllPreviews(preview, thumb)
+        }
+    }
+
+    private fun generateAllPreviews(previewBitmap: Bitmap, thumbBitmap: Bitmap) {
+        viewModelScope.launch {
+            val filters = _uiState.value.filters
+            val previews = MutableList<Bitmap?>(filters.size) { null }   // 400px — for main view
+            val thumbs  = MutableList<Bitmap?>(filters.size) { null }   // 80px  — for strip
+
+            // Generate all on background thread — no state updates mid-loop (no recomposition spam)
+            withContext(Dispatchers.Default) {
+                filters.forEachIndexed { i, filter ->
+                    previews[i] = gpuImageHelper.applyFilter(previewBitmap, filter.filter, 1.0f)
+                    thumbs[i]   = gpuImageHelper.applyFilter(thumbBitmap,  filter.filter, 1.0f)
+                }
+            }
+
+            // Single state update when everything is ready — one recomposition total
+            _uiState.value = _uiState.value.copy(
+                processedBitmap  = previews[0] ?: previewBitmap,
+                filterPreviews   = previews.toList(),
+                filterThumbnails = thumbs.toList(),
+                isPreviewing     = false
+            )
         }
     }
 
     fun selectFilter(index: Int) {
         if (_uiState.value.selectedIndex == index) return
         _uiState.value = _uiState.value.copy(selectedIndex = index)
-        applyFilter()
+
+        // If preview already generated → show instantly, no processing needed
+        val cached = _uiState.value.filterPreviews.getOrNull(index)
+        if (cached != null) {
+            val withIntensity = applyIntensityBlend(cached, index)
+            _uiState.value = _uiState.value.copy(processedBitmap = withIntensity)
+        } else {
+            // Preview not ready yet (still generating) → fallback to small bitmap
+            applyFilterOnPreview()
+        }
     }
 
     fun setIntensity(v: Float) {
         _uiState.value = _uiState.value.copy(intensity = v)
-        applyFilter()
+        // Re-apply intensity blend on cached preview (fast, no GPU needed at full res)
+        val cached = _uiState.value.filterPreviews.getOrNull(_uiState.value.selectedIndex)
+        if (cached != null) {
+            val withIntensity = applyIntensityBlend(cached, _uiState.value.selectedIndex)
+            _uiState.value = _uiState.value.copy(processedBitmap = withIntensity)
+        } else {
+            applyFilterOnPreview()
+        }
     }
 
-    private fun applyFilter() {
-        val original = _uiState.value.originalBitmap ?: return
-        val filter = _uiState.value.filters.getOrNull(_uiState.value.selectedIndex) ?: return
+    // Blends cached filtered preview with original preview based on intensity
+    private fun applyIntensityBlend(filtered: Bitmap, index: Int): Bitmap {
         val intensity = _uiState.value.intensity
+        if (intensity >= 0.99f) return filtered
+        val original = _uiState.value.previewBitmap ?: return filtered
+        val result = original.copy(android.graphics.Bitmap.Config.ARGB_8888, true)
+        val canvas = android.graphics.Canvas(result)
+        val paint = android.graphics.Paint().apply {
+            alpha = (intensity * 255).toInt().coerceIn(0, 255)
+        }
+        canvas.drawBitmap(filtered, 0f, 0f, paint)
+        return result
+    }
 
+    // Fallback: apply filter on small preview bitmap (much faster than full-res)
+    private fun applyFilterOnPreview() {
+        val preview = _uiState.value.previewBitmap ?: return
+        val filter = _uiState.value.filters.getOrNull(_uiState.value.selectedIndex) ?: return
         filterJob?.cancel()
         filterJob = viewModelScope.launch {
-            // Add a small delay for intensity slider to avoid too many intermediate frames
-            if (intensity != 1.0f && intensity != 0.0f) {
-                delay(16) 
-            }
-            _uiState.value = _uiState.value.copy(isProcessing = true)
-            val result = gpuImageHelper.applyFilter(original, filter.filter, intensity)
-            _uiState.value = _uiState.value.copy(processedBitmap = result, isProcessing = false)
+            if (_uiState.value.intensity != 1.0f && _uiState.value.intensity != 0.0f) delay(16)
+            val result = gpuImageHelper.applyFilter(preview, filter.filter, _uiState.value.intensity)
+            _uiState.value = _uiState.value.copy(processedBitmap = result)
         }
     }
 
     fun saveResult(context: Context) {
-        val bitmap = _uiState.value.processedBitmap ?: return
+        // Apply filter on full-res original only when saving
+        val original = _uiState.value.originalBitmap ?: return
+        val filter = _uiState.value.filters.getOrNull(_uiState.value.selectedIndex) ?: return
         viewModelScope.launch {
-            photoRepository.savePhoto(bitmap, context)
-            _uiState.value = _uiState.value.copy(isSaved = true)
+            _uiState.value = _uiState.value.copy(isProcessing = true)
+            val fullResResult = withContext(Dispatchers.Default) {
+                gpuImageHelper.applyFilter(original, filter.filter, _uiState.value.intensity)
+            }
+            photoRepository.savePhoto(fullResResult, context)
+            _uiState.value = _uiState.value.copy(isSaved = true, isProcessing = false)
         }
     }
 }
@@ -149,9 +222,14 @@ fun FilterScreen(
                     modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit
                 )
             } ?: CircularProgressIndicator(color = PinkAccent)
+            // Show spinner only when saving (full-res processing), not during filter switching
             if (uiState.isProcessing) {
-                Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.3f)), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = PinkAccent)
+                Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f)), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(color = PinkAccent)
+                        Spacer(Modifier.height(8.dp))
+                        Text("Saving...", color = Color.White, fontSize = 12.sp)
+                    }
                 }
             }
         }
@@ -166,31 +244,70 @@ fun FilterScreen(
                 colors = SliderDefaults.colors(thumbColor = PinkAccent, activeTrackColor = PinkAccent))
         }
 
-        // Filter strip
+        // Filter strip — thumbnails are 80px bitmaps, rendered at 60dp
+        // key(index) ensures only the tapped item recomposes on selection change
         LazyRow(
             modifier = Modifier.fillMaxWidth().background(SurfaceDark).padding(vertical = 8.dp),
             contentPadding = PaddingValues(horizontal = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            itemsIndexed(uiState.filters) { index, filter ->
+            itemsIndexed(uiState.filters, key = { index, _ -> index }) { index, filter ->
                 val isSelected = uiState.selectedIndex == index
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.clickable { viewModel.selectFilter(index) }.padding(4.dp)
+                val thumbnail = uiState.filterThumbnails.getOrNull(index)
+                FilterStripItem(
+                    name = filter.name,
+                    thumbnail = thumbnail,
+                    isSelected = isSelected,
+                    onClick = { viewModel.selectFilter(index) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun FilterStripItem(
+    name: String,
+    thumbnail: Bitmap?,
+    isSelected: Boolean,
+    onClick: () -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.clickable(onClick = onClick).padding(4.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(60.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .border(
+                    width = if (isSelected) 2.dp else 0.dp,
+                    color = if (isSelected) PinkAccent else Color.Transparent,
+                    shape = RoundedCornerShape(12.dp)
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            if (thumbnail != null) {
+                androidx.compose.foundation.Image(
+                    bitmap = thumbnail.asImageBitmap(),
+                    contentDescription = name,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            } else {
+                Box(
+                    modifier = Modifier.fillMaxSize().background(Color(0xFF2A2A2A)),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Box(
-                        modifier = Modifier.size(60.dp).clip(RoundedCornerShape(12.dp))
-                            .background(if (isSelected) PinkAccent.copy(alpha = 0.25f) else Color(0xFF2A2A2A))
-                            .border(if (isSelected) 2.dp else 0.dp, if (isSelected) PinkAccent else Color.Transparent, RoundedCornerShape(12.dp)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(filter.name.first().toString(), color = if (isSelected) PinkAccent else Color.Gray,
-                            fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                    }
-                    Spacer(Modifier.height(4.dp))
-                    Text(filter.name, color = if (isSelected) PinkAccent else Color.Gray, fontSize = 10.sp)
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        color = PinkAccent,
+                        strokeWidth = 2.dp
+                    )
                 }
             }
         }
+        Spacer(Modifier.height(4.dp))
+        Text(name, color = if (isSelected) PinkAccent else Color.Gray, fontSize = 10.sp)
     }
 }

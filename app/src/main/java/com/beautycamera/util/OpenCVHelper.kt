@@ -1,10 +1,12 @@
 package com.beautycamera.util
 
 import android.graphics.Bitmap
+import android.util.Log
 import com.beautycamera.domain.model.BodySettings
 import com.beautycamera.domain.model.PoseLandmarks
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.opencv.android.OpenCVLoader
 import org.opencv.android.Utils
 import org.opencv.core.CvType
 import org.opencv.core.Mat
@@ -22,20 +24,38 @@ import kotlin.math.roundToInt
 class OpenCVHelper @Inject constructor() {
 
     companion object {
+        private const val TAG = "OpenCVHelper"
+        var isOpenCVLoaded = false
+            private set
+
         init {
-            try {
-                System.loadLibrary("opencv_java4")
-            } catch (e: UnsatisfiedLinkError) {
-                e.printStackTrace()
+            isOpenCVLoaded = try {
+                OpenCVLoader.initLocal()
+            } catch (e: Exception) {
+                Log.e(TAG, "OpenCVLoader.initLocal() failed: ${e.message}")
+                try {
+                    System.loadLibrary("opencv_java4")
+                    true
+                } catch (e2: UnsatisfiedLinkError) {
+                    Log.e(TAG, "System.loadLibrary also failed: ${e2.message}")
+                    false
+                }
             }
+            Log.d(TAG, "OpenCV loaded: $isOpenCVLoaded")
         }
     }
 
     suspend fun applyBodyReshape(bitmap: Bitmap, settings: BodySettings): Bitmap =
         withContext(Dispatchers.Default) {
+            if (!isOpenCVLoaded) {
+                Log.e(TAG, "OpenCV not loaded — body reshape skipped")
+                return@withContext bitmap
+            }
             var result = bitmap
-            if (settings.slimBody > 0f || settings.slimWaist > 0f)
-                result = applyBodySlim(result, settings.slimBody, settings.slimWaist)
+            if (settings.slimBody > 0f)
+                result = applyBodySlim(result, settings.slimBody)
+            if (settings.slimWaist > 0f)
+                result = applyWaistSlimNoPose(result, settings.slimWaist)
             if (settings.legLengthening > 0f)
                 result = applyLegLengthening(result, settings.legLengthening)
             if (settings.bustEnhance > 0f)
@@ -52,13 +72,16 @@ class OpenCVHelper @Inject constructor() {
         settings: BodySettings,
         poseLandmarks: PoseLandmarks
     ): Bitmap = withContext(Dispatchers.Default) {
+        if (!isOpenCVLoaded) {
+            Log.e(TAG, "OpenCV not loaded — body reshape with pose skipped")
+            return@withContext bitmap
+        }
         try {
             var result = bitmap
-
+            if (settings.slimBody > 0f)
+                result = applyBodySlim(result, settings.slimBody)
             if (settings.slimWaist > 0f)
                 result = applyWaistSlim(result, poseLandmarks, settings.slimWaist)
-            if (settings.slimBody > 0f)
-                result = applyBodySlim(result, settings.slimBody, 0f)
             if (settings.legLengthening > 0f)
                 result = applyLegLengtheningWithPose(result, poseLandmarks, settings.legLengthening)
             if (settings.bustEnhance > 0f)
@@ -69,7 +92,7 @@ class OpenCVHelper @Inject constructor() {
                 result = applyShoulderReshape(result, poseLandmarks, settings.shoulderReshape)
             result
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "applyBodyReshapeWithPose failed: ${e.message}")
             bitmap
         }
     }
@@ -94,7 +117,7 @@ class OpenCVHelper @Inject constructor() {
                 val rightHip = pose.points[24]
 
                 val waistY = ((leftHip.second + rightHip.second) / 2 * h).toInt()
-                val squeezeAmount = (w * 0.05f * intensity).toInt()
+                val squeezeAmount = (w * 0.12f * intensity).toInt()  // increased from 0.05
 
                 // Build remap matrices
                 val mapX = Mat(src.rows(), src.cols(), CvType.CV_32FC1)
@@ -133,11 +156,7 @@ class OpenCVHelper @Inject constructor() {
         }
     }
 
-    private fun applyBodySlim(
-        bitmap: Bitmap,
-        bodyIntensity: Float,
-        waistIntensity: Float
-    ): Bitmap {
+    private fun applyBodySlim(bitmap: Bitmap, intensity: Float): Bitmap {
         return try {
             val src = Mat()
             Utils.bitmapToMat(bitmap, src)
@@ -146,7 +165,7 @@ class OpenCVHelper @Inject constructor() {
             val h = src.rows()
             val mapX = Mat(h, w, CvType.CV_32FC1)
             val mapY = Mat(h, w, CvType.CV_32FC1)
-            val squeeze = bodyIntensity * 0.08f
+            val squeeze = intensity * 0.18f  // increased from 0.08 → visible effect
 
             for (y in 0 until h) {
                 for (x in 0 until w) {
@@ -163,7 +182,43 @@ class OpenCVHelper @Inject constructor() {
             src.release(); dst.release(); mapX.release(); mapY.release()
             result
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "applyBodySlim failed: ${e.message}")
+            bitmap
+        }
+    }
+
+    // Waist slim without pose landmarks — squeezes center of image horizontally
+    private fun applyWaistSlimNoPose(bitmap: Bitmap, intensity: Float): Bitmap {
+        val waistY = bitmap.height * 0.50f
+        return try {
+            val src = Mat(); Utils.bitmapToMat(bitmap, src)
+            val dst = src.clone()
+            val w = src.cols(); val h = src.rows()
+            val mapX = Mat(h, w, CvType.CV_32FC1)
+            val mapY = Mat(h, w, CvType.CV_32FC1)
+            val squeezeAmount = (w * 0.12f * intensity).toInt()  // 12% max squeeze
+
+            for (y in 0 until h) {
+                for (x in 0 until w) {
+                    val centerX = w / 2f
+                    val distFromCenter = x - centerX
+                    val distFromWaist = abs(y - waistY)
+                    val influence = max(0f, 1f - distFromWaist / (h * 0.18f))
+                    val newX = if (distFromCenter > 0)
+                        x - (squeezeAmount * influence * (distFromCenter / (w / 2f))).toInt()
+                    else
+                        x + (squeezeAmount * influence * (-distFromCenter / (w / 2f))).toInt()
+                    mapX.put(y, x, newX.toDouble())
+                    mapY.put(y, x, y.toDouble())
+                }
+            }
+            Imgproc.remap(src, dst, mapX, mapY, Imgproc.INTER_LINEAR)
+            val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            Utils.matToBitmap(dst, result)
+            src.release(); dst.release(); mapX.release(); mapY.release()
+            result
+        } catch (e: Exception) {
+            Log.e(TAG, "applyWaistSlimNoPose failed: ${e.message}")
             bitmap
         }
     }
@@ -174,7 +229,7 @@ class OpenCVHelper @Inject constructor() {
             val legRegion = Bitmap.createBitmap(
                 bitmap, 0, legStartY, bitmap.width, bitmap.height - legStartY
             )
-            val stretchFactor = 1f + intensity * 0.08f
+            val stretchFactor = 1f + intensity * 0.18f  // increased from 0.08
             val newLegHeight = (legRegion.height * stretchFactor).toInt()
             val stretchedLegs = Bitmap.createScaledBitmap(
                 legRegion, bitmap.width, newLegHeight, true
@@ -205,7 +260,7 @@ class OpenCVHelper @Inject constructor() {
             val legRegion = Bitmap.createBitmap(
                 bitmap, 0, hipY, bitmap.width, bitmap.height - hipY
             )
-            val newHeight = (legRegion.height * (1f + intensity * 0.08f)).toInt()
+            val newHeight = (legRegion.height * (1f + intensity * 0.18f)).toInt()
             val stretched = Bitmap.createScaledBitmap(legRegion, bitmap.width, newHeight, true)
             val result = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
             val canvas = android.graphics.Canvas(result)
@@ -233,7 +288,7 @@ class OpenCVHelper @Inject constructor() {
             val chestY = ((pose.points[11].second + pose.points[12].second) / 2f * h.toFloat())
             val chestX = (w / 2f)
             val radius = w * 0.15f
-            val expand = intensity * 8f
+            val expand = intensity * 22f  // increased from 8
 
             val mapX = Mat(h, w, CvType.CV_32FC1)
             val mapY = Mat(h, w, CvType.CV_32FC1)
@@ -275,7 +330,7 @@ class OpenCVHelper @Inject constructor() {
             val rightHipX = pose.points[24].first  * w
             val hipY      = ((pose.points[23].second + pose.points[24].second) / 2f * h)
             val radius    = abs(rightHipX - leftHipX) * 0.65f
-            val expand    = intensity * 14f
+            val expand    = intensity * 28f  // increased from 14
             val mapX = Mat(h, w, CvType.CV_32FC1)
             val mapY = Mat(h, w, CvType.CV_32FC1)
             for (y in 0 until h) {
@@ -314,7 +369,7 @@ class OpenCVHelper @Inject constructor() {
         val hipY = bitmap.height * 0.58f
         val cx = bitmap.width / 2f
         val radius = bitmap.width * 0.38f
-        val expand = intensity * 14f
+        val expand = intensity * 28f  // increased from 14
         return try {
             val src = Mat(); Utils.bitmapToMat(bitmap, src)
             val dst = src.clone()
@@ -413,7 +468,7 @@ class OpenCVHelper @Inject constructor() {
         val chestY = bitmap.height * 0.35f
         val chestX = bitmap.width / 2f
         val radius = bitmap.width * 0.18f
-        val expand = intensity * 10f
+        val expand = intensity * 22f  // increased from 10
         return try {
             val src = Mat(); Utils.bitmapToMat(bitmap, src)
             val dst = src.clone()

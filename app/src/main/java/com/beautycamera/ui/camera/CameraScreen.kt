@@ -4,7 +4,6 @@ import android.graphics.Bitmap
 import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
@@ -14,6 +13,7 @@ import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -33,7 +33,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
@@ -47,12 +49,14 @@ import com.beautycamera.ui.theme.BackgroundDark
 import com.beautycamera.ui.theme.PinkAccent
 import com.beautycamera.ui.theme.SurfaceDark
 import com.beautycamera.ui.theme.SurfaceVariant
+import com.beautycamera.util.GPUImageHelper
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
-import jp.co.cyberagent.android.gpuimage.GPUImage
-import jp.co.cyberagent.android.gpuimage.GPUImageView
 import jp.co.cyberagent.android.gpuimage.filter.GPUImageFilter
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
 
 @OptIn(ExperimentalPermissionsApi::class)
@@ -106,8 +110,10 @@ fun CameraScreen(
         return
     }
 
+    // Return null for index 0 (Natural) so no overlay is drawn — raw preview is shown as-is.
     val selectedFilter = remember(uiState.selectedFilterIndex, uiState.filters) {
-        uiState.filters.getOrNull(uiState.selectedFilterIndex)?.filter
+        if (uiState.selectedFilterIndex == 0) null
+        else uiState.filters.getOrNull(uiState.selectedFilterIndex)?.filter
     }
 
     Box(modifier = modifier.fillMaxSize().background(BackgroundDark)) {
@@ -461,13 +467,13 @@ fun CaptureButton(
  * Camera preview with live filter overlay.
  *
  * Architecture:
- * - PreviewView (bottom): raw hardware camera feed — always visible, guarantees reliable capture.
- * - GPUImageView (top):   ImageAnalysis frames with the selected GPU filter applied.
- *                         alpha = filterIntensity so the slider blends raw ↔ filtered.
+ * - PreviewView (bottom): raw hardware camera feed via Preview + ImageCapture (2 use cases,
+ *   works on ALL devices — no more silent 3-use-case fallback).
+ * - Compose Image (top): filtered bitmap grabbed from PreviewView.bitmap every ~100ms,
+ *   processed on a background thread, shown as a Compose overlay.
  *
- * Camera binding: tries Preview + ImageAnalysis + ImageCapture (3 use cases).
- * Falls back to Preview + ImageCapture (2 use cases) if the device rejects 3.
- * Capture always works because Preview + ImageCapture is the primary binding.
+ * This approach is fully reliable: no ImageAnalysis dependency, no GPUImageView GL threading
+ * issues. The filter is visible immediately when tapped.
  */
 @Composable
 fun CameraPreview(
@@ -479,17 +485,49 @@ fun CameraPreview(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val analyzerExecutor = remember { Executors.newSingleThreadExecutor() }
-    // Holds the GPUImageView so filter changes can be applied without rebinding the camera.
-    val gpuViewRef = remember { mutableStateOf<GPUImageView?>(null) }
+    val gpuImageHelper = remember { GPUImageHelper(context) }
+    val previewViewRef = remember { mutableStateOf<PreviewView?>(null) }
+    var filteredOverlay by remember { mutableStateOf<Bitmap?>(null) }
+    // Prevents queueing multiple filter jobs when GPU is still busy with previous frame
+    val isProcessingFrame = remember { mutableStateOf(false) }
 
-    DisposableEffect(Unit) {
-        onDispose { analyzerExecutor.shutdown() }
-    }
-
-    // Update filter on the overlay view without touching the camera.
+    // Live filter preview loop.
+    // - Waits 300ms before starting (debounce) — no processing while user is scrolling through filters
+    // - Bitmap scaled to 320px max before GPU processing
+    // - Skips frame if previous still processing
+    // - Recycles old overlay bitmaps immediately
     LaunchedEffect(selectedFilter) {
-        gpuViewRef.value?.filter = selectedFilter ?: GPUImageFilter()
+        filteredOverlay?.recycle()
+        filteredOverlay = null
+        isProcessingFrame.value = false
+
+        if (selectedFilter == null) return@LaunchedEffect
+
+        // Debounce: wait for user to settle on a filter before starting GPU work
+        delay(300)
+
+        while (true) {
+            delay(150)
+            if (isProcessingFrame.value) continue
+
+            val rawBmp = previewViewRef.value?.bitmap ?: continue
+            isProcessingFrame.value = true
+
+            val result = withContext(Dispatchers.Default) {
+                val scale = 320f / maxOf(rawBmp.width, rawBmp.height)
+                val small = if (scale < 1f)
+                    Bitmap.createScaledBitmap(rawBmp, (rawBmp.width * scale).toInt(),
+                        (rawBmp.height * scale).toInt(), false)
+                else rawBmp
+                val filtered = gpuImageHelper.applyFilterPreview(small, selectedFilter)
+                if (small !== rawBmp) small.recycle()
+                filtered
+            }
+
+            filteredOverlay?.recycle()
+            filteredOverlay = result
+            isProcessingFrame.value = false
+        }
     }
 
     // key() forces full teardown + recreation only when the camera selector changes.
@@ -498,60 +536,48 @@ fun CameraPreview(
 
         Box(modifier = modifier) {
 
-            // ── Bottom layer: raw PreviewView (hardware path, reliable) ──────────
-            // Camera is set up only in factory. key(isFrontCamera) recreates this
-            // composable when the camera selector changes, so update never rebinds.
+            // ── Bottom layer: raw PreviewView (Preview + ImageCapture, always 2 use cases) ──
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
                     val previewView = PreviewView(ctx).apply {
                         layoutParams = ViewGroup.LayoutParams(MATCH_PARENT, MATCH_PARENT)
                         scaleType = PreviewView.ScaleType.FILL_CENTER
+                        implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                     }
-                    bindCamera(
-                        ctx, lifecycleOwner, isFrontCamera,
-                        cameraProviderFuture, previewView,
-                        analyzerExecutor, gpuViewRef,
-                        onImageCaptureReady
-                    )
+                    previewViewRef.value = previewView
+                    bindCamera(ctx, lifecycleOwner, isFrontCamera, cameraProviderFuture,
+                        previewView, onImageCaptureReady)
                     previewView
                 }
             )
 
-            // ── Top layer: filtered GPUImageView — alpha = filterIntensity ───────
-            AndroidView(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer(alpha = filterIntensity),
-                factory = { ctx ->
-                    GPUImageView(ctx).apply {
-                        layoutParams = ViewGroup.LayoutParams(MATCH_PARENT, MATCH_PARENT)
-                        setScaleType(GPUImage.ScaleType.CENTER_CROP)
-                        filter = selectedFilter ?: GPUImageFilter()
-                    }.also { gpuViewRef.value = it }
-                },
-                update = { view ->
-                    view.filter = selectedFilter ?: GPUImageFilter()
-                }
-            )
+            // ── Top layer: filtered overlay — shown only when a filter is active ──
+            filteredOverlay?.let { bmp ->
+                Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = null,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer(alpha = filterIntensity),
+                    contentScale = ContentScale.Crop
+                )
+            }
         }
     }
 }
 
-/** Binds Preview + ImageCapture (always) and optionally ImageAnalysis for the filter overlay. */
+/** Binds Preview + ImageCapture (2 use cases — works on all devices). */
 private fun bindCamera(
     context: android.content.Context,
     lifecycleOwner: androidx.lifecycle.LifecycleOwner,
     isFrontCamera: Boolean,
     cameraProviderFuture: com.google.common.util.concurrent.ListenableFuture<ProcessCameraProvider>,
     previewView: PreviewView,
-    analyzerExecutor: java.util.concurrent.ExecutorService,
-    gpuViewRef: MutableState<GPUImageView?>,
     onImageCaptureReady: (ImageCapture) -> Unit
 ) {
     cameraProviderFuture.addListener({
         val cameraProvider = cameraProviderFuture.get()
-
         val cameraSelector = if (isFrontCamera)
             CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
 
@@ -560,47 +586,9 @@ private fun bindCamera(
         }
         val imageCapture = ImageCapture.Builder().build()
 
-        val imageAnalysis = ImageAnalysis.Builder()
-            .setTargetResolution(android.util.Size(480, 640))
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .build().also { analysis ->
-                analysis.setAnalyzer(analyzerExecutor) { imageProxy ->
-                    val rotationDegrees = imageProxy.imageInfo.rotationDegrees
-                    val src = imageProxy.toBitmap()
-                    imageProxy.close()
-
-                    val rotated = if (rotationDegrees != 0) {
-                        val m = android.graphics.Matrix().apply { postRotate(rotationDegrees.toFloat()) }
-                        Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, false)
-                            .also { src.recycle() }
-                    } else src
-
-                    val frame = if (isFrontCamera) {
-                        val m = android.graphics.Matrix().apply {
-                            postScale(-1f, 1f, rotated.width / 2f, rotated.height / 2f)
-                        }
-                        Bitmap.createBitmap(rotated, 0, 0, rotated.width, rotated.height, m, false)
-                            .also { rotated.recycle() }
-                    } else rotated
-
-                    gpuViewRef.value?.setImage(frame)
-                }
-            }
-
         try {
             cameraProvider.unbindAll()
-            // Try with filter overlay (3 use cases).
-            try {
-                cameraProvider.bindToLifecycle(
-                    lifecycleOwner, cameraSelector, preview, imageAnalysis, imageCapture
-                )
-            } catch (e: Exception) {
-                // Device doesn't support 3 simultaneous use cases — fall back to 2.
-                // Capture still works; filter overlay just won't update live.
-                cameraProvider.bindToLifecycle(
-                    lifecycleOwner, cameraSelector, preview, imageCapture
-                )
-            }
+            cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, imageCapture)
             onImageCaptureReady(imageCapture)
         } catch (e: Exception) {
             e.printStackTrace()

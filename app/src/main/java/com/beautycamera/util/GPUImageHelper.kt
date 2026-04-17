@@ -32,6 +32,9 @@ import javax.inject.Singleton
 @Singleton
 class GPUImageHelper @Inject constructor(private val context: Context) {
 
+    // Reused for camera live preview frames (small bitmaps, frequent calls)
+    private val previewGpu: GPUImage by lazy { GPUImage(context) }
+
     suspend fun applyFilter(bitmap: Bitmap, filter: GPUImageFilter, intensity: Float = 1.0f): Bitmap =
         withContext(Dispatchers.Default) {
             try {
@@ -54,6 +57,18 @@ class GPUImageHelper @Inject constructor(private val context: Context) {
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
+                bitmap
+            }
+        }
+
+    // Lightweight version for camera live preview — reuses GPUImage instance, no intensity blend
+    suspend fun applyFilterPreview(bitmap: Bitmap, filter: GPUImageFilter): Bitmap =
+        withContext(Dispatchers.Default) {
+            try {
+                previewGpu.setImage(bitmap)
+                previewGpu.setFilter(filter)
+                previewGpu.bitmapWithFilterApplied ?: bitmap
+            } catch (e: Exception) {
                 bitmap
             }
         }
