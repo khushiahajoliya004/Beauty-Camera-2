@@ -190,7 +190,7 @@ object AppModule {
     @Named("PythonRetrofit")
     fun providePythonRetrofit(@Named("PythonClient") client: OkHttpClient): Retrofit =
         Retrofit.Builder()
-            .baseUrl("http://192.168.1.3:8000/")     // real device → host LAN IP
+            .baseUrl("http://192.168.1.15:8000/")     // real device → host LAN IP
             .client(client)
             .addConverterFactory(GsonConverterFactory.create())
             .build()
