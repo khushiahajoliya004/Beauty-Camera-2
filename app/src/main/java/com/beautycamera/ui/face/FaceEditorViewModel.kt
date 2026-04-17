@@ -204,6 +204,12 @@ class FaceEditorViewModel @Inject constructor(
         applyAllEffects()
     }
 
+    fun setBlushColor(color: Int) {
+        val settings = _uiState.value.beautySettings.copy(blushColor = color)
+        _uiState.value = _uiState.value.copy(beautySettings = settings)
+        applyAllEffects()
+    }
+
     fun updateEyeColorOpacity(value: Float) {
         val settings = _uiState.value.beautySettings.copy(eyeColorOpacity = value)
         _uiState.value = _uiState.value.copy(beautySettings = settings)
@@ -390,7 +396,7 @@ class FaceEditorViewModel @Inject constructor(
                     if (settings.blushIntensity > 0f) {
                         val lc = mediaPipeHelper.getLandmarkPixelCoords(landmarks, mediaPipeHelper.leftCheekIndices)
                         val rc = mediaPipeHelper.getLandmarkPixelCoords(landmarks, mediaPipeHelper.rightCheekIndices)
-                        advance(gpuImageHelper.applyBlush(current, lc, rc, settings.blushIntensity))
+                        advance(gpuImageHelper.applyBlush(current, lc, rc, settings.blushIntensity, settings.blushColor))
                     }
                     if (settings.eyeColorOpacity > 0f) {
                         val li = mediaPipeHelper.getLandmarkPixelCoords(landmarks, mediaPipeHelper.leftIrisIndices)

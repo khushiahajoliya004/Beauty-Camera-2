@@ -63,10 +63,12 @@ data class AIArtCard(
 
 data class BeautySettings(
     val skinSmoothing: Float = 0f,
-    val lipColor: Int = android.graphics.Color.RED,
+    val lipColor: Int = 0xFFB5474A.toInt(),   // natural rose-red
     val lipOpacity: Float = 0f,
     val blushIntensity: Float = 0f,
-    val eyeColor: Int = android.graphics.Color.BLUE,
+    val blushColor: Int = 0xFFE8A0A8.toInt(),  // soft peach-rose
+    val eyeColor: Int = 0xFF8B6552.toInt(),   // warm brown
+
     val eyeColorOpacity: Float = 0f,
     val foundationIntensity: Float = 0f
 )

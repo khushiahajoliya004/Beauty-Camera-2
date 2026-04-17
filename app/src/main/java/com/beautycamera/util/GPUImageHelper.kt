@@ -198,27 +198,24 @@ class GPUImageHelper @Inject constructor(private val context: Context) {
         bitmap: Bitmap,
         leftCheekPoints: List<Pair<Float, Float>>,
         rightCheekPoints: List<Pair<Float, Float>>,
-        intensity: Float
+        intensity: Float,
+        color: Int = 0xFFE8A0A8.toInt()  // default: soft peach-rose
     ): Bitmap {
         if (leftCheekPoints.isEmpty() || rightCheekPoints.isEmpty()) return bitmap
         val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
         val canvas = Canvas(result)
 
-        // Compute both cheek centers first so we can derive a face-relative radius
         val leftCX  = leftCheekPoints.map  { it.first  }.average().toFloat()
         val leftCY  = leftCheekPoints.map  { it.second }.average().toFloat()
         val rightCX = rightCheekPoints.map { it.first  }.average().toFloat()
         val rightCY = rightCheekPoints.map { it.second }.average().toFloat()
 
-        // Radius = 28 % of the distance between the two cheek centers.
-        // This scales naturally with face size in the photo.
         val faceWidth = Math.abs(rightCX - leftCX).coerceAtLeast(bitmap.width * 0.1f)
         val radius = faceWidth * 0.28f
 
         fun drawBlushOnCheek(cx: Float, cy: Float) {
             val peakAlpha = (intensity * 85).toInt().coerceIn(0, 100)
-            // Natural rose color — softer than the old harsh red
-            val r = 220; val g = 110; val b = 120
+            val r = Color.red(color); val g = Color.green(color); val b = Color.blue(color)
             val gradient = RadialGradient(
                 cx, cy, radius,
                 intArrayOf(

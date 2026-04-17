@@ -709,12 +709,27 @@ private fun MakeupPanel(state: FaceEditorUiState, vm: FaceEditorViewModel) {
         MakeupSubTool.SKIN -> IntensitySlider("Skin Smoothing", state.beautySettings.skinSmoothing) { vm.updateSkinSmoothing(it) }
         MakeupSubTool.LIPS -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             IntensitySlider("Lip Opacity", state.beautySettings.lipOpacity) { vm.updateLipOpacity(it) }
-            ColorPicker(selectedColor = Color(state.beautySettings.lipColor), onColorSelected = { vm.setLipColor(it.toArgb()) })
+            ColorPicker(
+                selectedColor = Color(state.beautySettings.lipColor),
+                palette = LIP_COLORS,
+                onColorSelected = { vm.setLipColor(it.toArgb()) }
+            )
         }
-        MakeupSubTool.BLUSH -> IntensitySlider("Blush Intensity", state.beautySettings.blushIntensity) { vm.updateBlushIntensity(it) }
+        MakeupSubTool.BLUSH -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            IntensitySlider("Blush Intensity", state.beautySettings.blushIntensity) { vm.updateBlushIntensity(it) }
+            ColorPicker(
+                selectedColor = Color(state.beautySettings.blushColor),
+                palette = BLUSH_COLORS,
+                onColorSelected = { vm.setBlushColor(it.toArgb()) }
+            )
+        }
         MakeupSubTool.EYES -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             IntensitySlider("Eye Color Opacity", state.beautySettings.eyeColorOpacity) { vm.updateEyeColorOpacity(it) }
-            ColorPicker(selectedColor = Color(state.beautySettings.eyeColor), onColorSelected = { vm.setEyeColor(it.toArgb()) })
+            ColorPicker(
+                selectedColor = Color(state.beautySettings.eyeColor),
+                palette = EYE_COLORS,
+                onColorSelected = { vm.setEyeColor(it.toArgb()) }
+            )
         }
         MakeupSubTool.FOUNDATION -> IntensitySlider("Foundation", state.beautySettings.foundationIntensity) { vm.updateFoundationIntensity(it) }
     }
@@ -742,16 +757,74 @@ fun IntensitySlider(
     }
 }
 
+// Real makeup lip shades — nudes, berries, reds, corals, mauves
+val LIP_COLORS = listOf(
+    Color(0xFFB5474A), // Classic Red
+    Color(0xFFD2504E), // True Red
+    Color(0xFFE8737A), // Coral Red
+    Color(0xFFE85D7A), // Hot Pink
+    Color(0xFFD4547A), // Berry Rose
+    Color(0xFFAB3D6B), // Deep Berry
+    Color(0xFF8B2252), // Dark Plum
+    Color(0xFFCC6B7A), // Mauve Pink
+    Color(0xFFB87A6B), // Rose Brown
+    Color(0xFF9C6B5A), // Nude Brown
+    Color(0xFFCC9080), // Peachy Nude
+    Color(0xFFE8A898), // Light Nude
+    Color(0xFFFF7B6B), // Coral Orange
+    Color(0xFFD4885A), // Terracotta
+    Color(0xFF7A2040), // Burgundy
+    Color(0xFF4A1030), // Dark Wine
+)
+
+// Real makeup blush shades — peach, rose, coral, bronze, berry
+val BLUSH_COLORS = listOf(
+    Color(0xFFE8A0A8), // Soft Peach Rose (default)
+    Color(0xFFFFB3B3), // Baby Pink
+    Color(0xFFFF8FA3), // Warm Pink
+    Color(0xFFE8647A), // Deep Rose
+    Color(0xFFFFAA80), // Peach Coral
+    Color(0xFFFF8C60), // Coral
+    Color(0xFFE07B54), // Terracotta
+    Color(0xFFC8906A), // Bronze Peach
+    Color(0xFFB87A70), // Dusty Rose
+    Color(0xFF9C6B80), // Mauve Berry
+    Color(0xFF8B5A6B), // Deep Berry
+    Color(0xFFD4A0B0), // Lavender Pink
+    Color(0xFFC8A08A), // Warm Nude
+    Color(0xFFB89880), // Sandy Nude
+    Color(0xFF8B7060), // Brown Taupe
+    Color(0xFF704830), // Deep Bronze
+)
+
+// Real makeup eye shades — browns, golds, smoky, teals
+val EYE_COLORS = listOf(
+    Color(0xFF8B6552), // Warm Brown
+    Color(0xFF6B4226), // Deep Brown
+    Color(0xFF3D2314), // Espresso
+    Color(0xFFB8864E), // Caramel Gold
+    Color(0xFFD4A853), // Gold
+    Color(0xFFC8A870), // Champagne
+    Color(0xFF4A4A4A), // Charcoal
+    Color(0xFF2C2C2C), // Smoky Black
+    Color(0xFF5C5470), // Smoky Purple
+    Color(0xFF7B4F8A), // Plum
+    Color(0xFF3D5A80), // Steel Blue
+    Color(0xFF2E6B6B), // Teal
+    Color(0xFF4A7C5A), // Forest Green
+    Color(0xFFB87B8B), // Dusty Rose
+    Color(0xFF8B7355), // Taupe
+    Color(0xFFA0522D), // Bronze
+)
+
 @Composable
-fun ColorPicker(selectedColor: Color, onColorSelected: (Color) -> Unit) {
-    val colors = listOf(
-        Color.Red, Color(0xFFE91E63), Color(0xFF9C27B0), Color(0xFF673AB7),
-        Color(0xFF3F51B5), Color(0xFF2196F3), Color(0xFF00BCD4), Color(0xFF009688),
-        Color(0xFF4CAF50), Color(0xFFCDDC39), Color(0xFFFFEB3B), Color(0xFFFF9800),
-        Color(0xFFFF5722), Color(0xFF795548), Color.Gray, Color.White
-    )
+fun ColorPicker(
+    selectedColor: Color,
+    palette: List<Color> = LIP_COLORS,
+    onColorSelected: (Color) -> Unit
+) {
     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(colors) { color ->
+        items(palette) { color ->
             Box(
                 modifier = Modifier
                     .size(32.dp).clip(CircleShape).background(color)
